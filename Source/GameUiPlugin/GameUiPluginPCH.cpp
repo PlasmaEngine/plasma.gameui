@@ -1,0 +1,19 @@
+#include <GameUiPlugin/GameUiPluginPCH.h>
+
+PL_STATICLINK_LIBRARY(GameUiPlugin)
+{
+  if (bReturn)
+    return;
+
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Components_Implementation_UiBindingState);
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Components_Implementation_UiCanvasComponent);
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Components_Implementation_UiMessages);
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Elements_Implementation_UiAnimationClip);
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Elements_Implementation_UiElements);
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Elements_Implementation_UiLayout);
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Rendering_Implementation_UiRenderer);
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Resources_Implementation_UiDocumentResource);
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Resources_Implementation_UiFontResource);
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Resources_Implementation_UiStyleResource);
+  PL_STATICLINK_REFERENCE(GameUiPlugin_Startup);
+}
