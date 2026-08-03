@@ -1,0 +1,82 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[RENDERSTATE]
+
+BlendingEnabled0 = true
+DestBlend0 = Blend_InvSrcAlpha
+SourceBlend0 = Blend_SrcAlpha
+DestBlendAlpha0 = Blend_InvSrcAlpha
+DepthTest = false
+DepthWrite = false
+CullMode = CullMode_None
+ScissorTest = true
+
+[VERTEXSHADER]
+
+#include <Shaders/Common/GlobalConstants.h>
+#include "GameUiInterpolator.h"
+
+VS_OUT main(VS_IN Input)
+{
+  VS_OUT RetVal;
+
+  float2 screenPosition = (Input.Position.xy * ViewportSize.zw) * float2(2.0, -2.0) + float2(-1.0, 1.0);
+  RetVal.Position = float4(screenPosition, Input.Position.z, 1.0f);
+
+  RetVal.TexCoord0 = Input.TexCoord0;
+  RetVal.Color0 = Input.Color0;
+  RetVal.SdfCoord = Input.SdfCoord;
+  RetVal.SdfParams = Input.SdfParams;
+  RetVal.SdfRadii = Input.SdfRadii;
+  RetVal.ColorB = Input.ColorB;
+
+  return RetVal;
+}
+
+
+[PIXELSHADER]
+
+#include "GameUiInterpolator.h"
+
+Texture2D BaseTexture;
+SamplerState BaseTexture_AutoSampler;
+
+float4 main(PS_IN Input) : SV_Target
+{
+  float4 color = BaseTexture.Sample(BaseTexture_AutoSampler, Input.TexCoord0.xy) * Input.Color0;
+
+  const float mode = Input.SdfCoord.z;
+
+  if (mode > 0.5)
+  {
+    // rounded-box SDF brush (see plUiVertex): px from the rect center
+    const float2 halfSize = Input.SdfParams.xy;
+    const float2 p = (Input.SdfCoord.xy - 0.5) * 2.0 * halfSize;
+
+    const float d = GameUiRoundedBoxSdf(p, halfSize, Input.SdfRadii);
+    const float aa = max(fwidth(d), 0.0001);
+
+    if (mode < 1.5) // fill
+    {
+      color.a *= 1.0 - smoothstep(-aa, aa, d);
+    }
+    else if (mode < 2.5) // border: a band hugging the outline, drawn in the border color
+    {
+      const float borderWidth = max(Input.SdfParams.z, aa);
+      const float band = (1.0 - smoothstep(-aa, aa, d)) * smoothstep(-borderWidth - aa, -borderWidth + aa, d);
+      color.rgb = Input.ColorB.rgb;
+      color.a = Input.ColorB.a * Input.Color0.a * band;
+    }
+    else // shadow: soft falloff over the softness distance
+    {
+      const float softness = max(Input.SdfCoord.w, aa);
+      const float falloff = saturate(-d / softness);
+      color.a *= falloff * falloff; // quadratic = softer tail
+    }
+  }
+
+  return color;
+}

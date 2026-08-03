@@ -741,8 +741,19 @@ namespace
   {
     BundledFallbackFonts result;
 
-    plStringBuilder sSourceFolder = plFileSystem::GetSdkRootDirectory();
-    sSourceFolder.AppendPath("Data/Plugins/RmlUI");
+    // The stylesheet library these fonts come from ships in plasma.rmlui rather than in the engine,
+    // so where it sits depends on where that package is installed. Resolving a known file through
+    // the virtual file system finds it under whichever data directory provides it, and fails
+    // cleanly when the package is not installed at all.
+    plStringBuilder sSourceFolder;
+    if (plFileSystem::ResolvePath("RmlUI/LatoLatin-Regular.ttf", &sSourceFolder, nullptr).Failed())
+    {
+      report.Warning(sSourceName, "The bundled fallback fonts were not found; install the RmlUi package to import web fonts. "
+                                  "Text without an imported font will use the bitmap debug font.");
+      return result;
+    }
+
+    sSourceFolder.PathParentDirectory();
 
     plStringBuilder sTargetFolder = sFolderAbs;
     sTargetFolder.AppendPath("ImportedFonts");
