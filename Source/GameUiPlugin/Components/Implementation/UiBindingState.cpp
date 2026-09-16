@@ -1337,6 +1337,12 @@ void plUiBindingState::UpdateClips(plTime deltaTime)
       }
     }
 
+    if (m_bReducedMotion)
+    {
+      // Hold a stable final pose for one-shot/state clips and an initial pose for loops.
+      const bool active = instance.m_bStateActive || instance.m_bPlaying || instance.m_bExitPlaying;
+      instance.m_fTime = active && clip.m_LoopMode == plUiClipLoopMode::Once ? fDuration : 0.0f;
+    }
     // evaluate all tracks at the instance time
     for (const TrackInstance& track : instance.m_Tracks)
     {
@@ -1466,7 +1472,7 @@ void plUiBindingState::UpdateStates(plTime deltaTime, const plUiElementInstance&
       plUiAnimEasing::Enum easing = plUiAnimEasing::Linear;
       const float fDuration = GetStyleTransition(instance.m_pElement, easing);
 
-      AdvanceBlend(instance.m_fBlend, bActive, fDeltaTime, fDuration);
+      AdvanceBlend(instance.m_fBlend, bActive, fDeltaTime, m_bReducedMotion ? 0.0f : fDuration);
       resolved.m_fDisabledBlend = ApplyEasing(easing, instance.m_fBlend);
       continue;
     }
@@ -1562,7 +1568,7 @@ void plUiBindingState::UpdateStates(plTime deltaTime, const plUiElementInstance&
 
     instance.m_bWasActive = bActive;
 
-    AdvanceBlend(instance.m_fBlend, bActive, fDeltaTime, instance.m_pState->m_fEnterDuration);
+    AdvanceBlend(instance.m_fBlend, bActive, fDeltaTime, m_bReducedMotion ? 0.0f : instance.m_pState->m_fEnterDuration);
 
     float fEffective = ApplyEasing(static_cast<plUiAnimEasing::Enum>(instance.m_pState->m_Easing.GetValue()), instance.m_fBlend);
 
@@ -1620,8 +1626,8 @@ void plUiBindingState::UpdateStates(plTime deltaTime, const plUiElementInstance&
       plUiAnimEasing::Enum easing = plUiAnimEasing::Linear;
       const float fDuration = GetStyleTransition(element.m_pElement, easing);
 
-      AdvanceBlend(blends.x, bHovered || bPressed, fDeltaTime, fDuration);
-      AdvanceBlend(blends.y, bPressed, fDeltaTime, fDuration);
+      AdvanceBlend(blends.x, bHovered || bPressed, fDeltaTime, m_bReducedMotion ? 0.0f : fDuration);
+      AdvanceBlend(blends.y, bPressed, fDeltaTime, m_bReducedMotion ? 0.0f : fDuration);
 
       ResolvedValues& resolved = GetMutableResolved(element.m_pElement, element.m_uiSalt);
       resolved.m_uiFlags |= ResolvedValues::HasStateBlends;

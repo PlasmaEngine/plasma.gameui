@@ -1,4 +1,5 @@
 #include <GameUiPlugin/GameUiPluginPCH.h>
+#include <GameEngine/GameApplication/GameApplication.h>
 
 #include <GameUiPlugin/Components/UiCanvasComponent.h>
 #include <GameUiPlugin/Elements/UiLayout.h>
@@ -23,10 +24,11 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plUiCanvasScaleMode, 1)
   PL_ENUM_CONSTANTS(plUiCanvasScaleMode::ConstantPixel, plUiCanvasScaleMode::ScaleWithHeight)
 PL_END_STATIC_REFLECTED_ENUM;
 
-PL_BEGIN_COMPONENT_TYPE(plUiCanvasComponent, 4, plComponentMode::Static)
+PL_BEGIN_COMPONENT_TYPE(plUiCanvasComponent, 5, plComponentMode::Static)
 {
   PL_BEGIN_PROPERTIES
   {
+    PL_ACCESSOR_PROPERTY("GameSettingsMenu", GetGameSettingsMenu, SetGameSettingsMenu)->AddAttributes(new plDefaultValueAttribute(false)),
     PL_RESOURCE_ACCESSOR_PROPERTY("UiDocument", GetUiDocument, SetUiDocument)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Ui_Document")),
     PL_ENUM_ACCESSOR_PROPERTY("ScaleMode", plUiCanvasScaleMode, GetScaleMode, SetScaleMode),
     PL_ACCESSOR_PROPERTY("ReferenceHeight", GetReferenceHeight, SetReferenceHeight)->AddAttributes(new plDefaultValueAttribute(1080), new plSuffixAttribute("px")),
@@ -57,6 +59,16 @@ PL_END_COMPONENT_TYPE
 
 namespace
 {
+  float SettingsTextScale()
+  {
+    if (auto* app = plGameApplication::GetGameApplicationInstance())
+    {
+      const auto values = app->GetGameSettings().GetEffectiveSettings();
+      if (const auto* scale = values.GetValue("Accessibility.TextScale")) return scale->ConvertTo<float>();
+    }
+    return 1.0f;
+  }
+
   /// One authored post-layout transform. UI geometry remains a flat plane, but X/Y/Z
   /// rotations and Z translation are projected through a configurable focal distance.
   struct UiSubtreeTransform
@@ -947,7 +959,7 @@ namespace
     textColor *= tint;
     textColor.a *= fOpacity;
 
-    const plUInt32 uiFontSize = plMath::Max<plUInt32>(4, static_cast<plUInt32>(plMath::Round(visuals.m_fFontSize)));
+    const plUInt32 uiFontSize = plMath::Max<plUInt32>(4, static_cast<plUInt32>(plMath::Round(visuals.m_fFontSize * SettingsTextScale())));
 
     if (!visuals.m_hFont.IsValid())
     {
@@ -1387,7 +1399,7 @@ namespace
 
     // "style replaces visuals": font, color and size come from the composed look
     const plUiFontResourceHandle& hFont = visuals.m_hFont;
-    const plUInt32 uiFontSize = plMath::Max<plUInt32>(4, static_cast<plUInt32>(plMath::Round(visuals.m_fFontSize)));
+    const plUInt32 uiFontSize = plMath::Max<plUInt32>(4, static_cast<plUInt32>(plMath::Round(visuals.m_fFontSize * SettingsTextScale())));
 
     plColor color = visuals.m_TextColor;
     color *= tint;
@@ -2273,7 +2285,7 @@ plUiCanvasComponent::plUiCanvasComponent()
   m_pLocalBlackboard = plBlackboard::Create();
   m_pLocalBlackboard->SetName("UiCanvasLocal");
 }
-plUiCanvasComponent::~plUiCanvasComponent() = default;
+plUiCanvasComponent::~plUiCanvasComponent() { CancelGameSettingsPreview(); }
 
 void plUiCanvasComponent::OnActivated()
 {
@@ -2496,6 +2508,11 @@ void plUiCanvasComponent::ComputeCanvasTransform(const plVec2& vViewportSize, fl
     out_fScale = vViewportSize.y / static_cast<float>(m_uiReferenceHeight);
   }
 
+  if (auto* app = plGameApplication::GetGameApplicationInstance())
+  {
+    auto values = app->GetGameSettings().GetEffectiveSettings();
+    if (const auto* scale = values.GetValue("Accessibility.UiScale")) out_fScale *= scale->ConvertTo<float>();
+  }
   out_vOffset = plVec2::MakeZero();
   out_vCanvasSize = vViewportSize / out_fScale;
 }
@@ -2534,6 +2551,7 @@ void plUiCanvasComponent::PublishInteractionState()
 
 void plUiCanvasComponent::Update()
 {
+  if (m_bGameSettingsMenu && !m_hDocument.IsValid()) CreateGameSettingsMenu();
   if (!m_hDocument.IsValid())
   {
     ResetInteractionState();
@@ -2557,6 +2575,8 @@ void plUiCanvasComponent::Update()
     m_uiLocalStateDocumentVersion = uiDocumentVersion;
     m_bBindingBoardsDirty = true;
   }
+
+  if (m_bGameSettingsMenu) UpdateGameSettings();
 
   const plTime now = plTime::Now();
   const plTime deltaTime = m_LastUpdateTime.IsZero() ? plTime::MakeZero() : plMath::Min(now - m_LastUpdateTime, plTime::MakeFromMilliseconds(100));
@@ -2584,6 +2604,12 @@ void plUiCanvasComponent::Update()
 
     // interaction blends use last frame's hover/press; the focused element counts as
     // hovered so styled widgets light up under gamepad/keyboard navigation
+    if (auto* app = plGameApplication::GetGameApplicationInstance())
+    {
+      auto values = app->GetGameSettings().GetEffectiveSettings();
+      const auto* reduced = values.GetValue("Accessibility.ReducedMotion");
+      m_BindingState.SetReducedMotion(reduced && reduced->ConvertTo<bool>());
+    }
     m_BindingState.Update(deltaTime, GetEffectiveHover(), m_PressedElement);
   }
 
@@ -3569,7 +3595,8 @@ void plUiCanvasComponent::SerializeComponent(plWorldWriter& inout_stream) const
   s << m_iSortOrder;
   s << m_bAutobindBlackboards;
 
-  // version 3
+  // version 5
+  s << m_bGameSettingsMenu;
 }
 
 void plUiCanvasComponent::DeserializeComponent(plWorldReader& inout_stream)
@@ -3595,6 +3622,7 @@ void plUiCanvasComponent::DeserializeComponent(plWorldReader& inout_stream)
     plUiStyleResourceHandle hLegacyStyleOverride;
     s >> hLegacyStyleOverride;
   }
+  if (uiVersion >= 5) s >> m_bGameSettingsMenu;
 }
 
 plResult plUiCanvasComponent::GetLocalBounds(plBoundingBoxSphere& ref_bounds, bool& ref_bAlwaysVisible, plMsgUpdateLocalBounds& ref_msg)

@@ -140,6 +140,9 @@ public:
   /// \brief Resolves changed bindings, advances state blends and clips. Main thread only.
   /// deltaTime should be wall-clock based so animations also play in editor previews.
   /// hovered/pressed is the component's current interaction state.
+  void SetReducedMotion(bool reduced) { m_bReducedMotion = reduced; }
+  bool m_bReducedMotion = false;
+
   void Update(plTime deltaTime, const plUiElementInstance& hovered, const plUiElementInstance& pressed);
 
   /// \brief Rebuilds discovery when any referenced sub-document resource has (re)loaded.

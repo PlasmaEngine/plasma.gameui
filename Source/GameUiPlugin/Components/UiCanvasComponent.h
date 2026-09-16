@@ -129,6 +129,10 @@ public:
   ~plUiCanvasComponent();
 
   void Update();
+  /// Enables the built-in settings menu when no document is assigned, or binds a custom menu.
+  void SetGameSettingsMenu(bool enabled) { m_bGameSettingsMenu = enabled; }
+  bool GetGameSettingsMenu() const { return m_bGameSettingsMenu; }
+  void OnDeactivated() override;
 
   virtual void SerializeComponent(plWorldWriter& inout_stream) const override;
   virtual void DeserializeComponent(plWorldReader& inout_stream) override;
@@ -251,6 +255,13 @@ protected:
 
   void ResetInteractionState();
   void UpdateBindingBoards();
+  void UpdateGameSettings();
+  void CreateGameSettingsMenu();
+  void CancelGameSettingsPreview();
+  bool m_bGameSettingsMenu = false;
+  plVariantDictionary m_SettingsDraft;
+  plUInt64 m_uiSettingsTransaction = 0;
+  plInt32 m_iSettingsStatus = -1;
 
   /// \brief The style to render with: the override when set, else the document's compiled style.
 
