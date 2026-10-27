@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Game UI — PlasmaEngine2 Manual</title>
+<link rel="stylesheet" href="manual.css" />
+</head>
+<body>
+<div class="wrap">
+  <p class="crumbs">Manual / Game UI</p>
+  <h1>Game UI</h1>
+
+  <p>
+    Game UI draws menus, HUDs and in-world screens from <b>UI Document</b> assets. A document is a tree of
+    elements (panels, texts, buttons, sliders, lists, vector shapes) placed by anchors and offsets, styled by
+    <b>UI Style</b> assets, drawn with <b>UI Font</b> assets, and bound to blackboard entries for live data. A
+    <b>UI Canvas</b> component shows a document over the screen or on a panel in the world. The runtime is part of
+    the engine; the <code>plasma.gameui</code> package adds the editors.
+  </p>
+
+  <h2>Pages</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Page</th><th>Covers</th></tr>
+    <tr><td><a href="FitAndTextFit.html">Fit to Content and Text Fit</a></td><td>Sizing elements to their content,
+      overflow modes, the Text Fit panel, language preview, pseudo-localisation, transform warnings.</td></tr>
+    <tr><td><a href="FontsAndCharacters.html">Fonts and Characters</a></td><td>What a UI Font bakes, fallback fonts,
+      fixing missing characters.</td></tr>
+    <tr><td><a href="WorldSpaceCanvas.html">World-Space Canvases</a></td><td>Panels in the scene, billboards,
+      depth, pointer and gaze input.</td></tr>
+    <tr><td><a href="TextAndBrushEffects.html">Text and Brush Effects</a></td><td>Text outline and shadow,
+      gradients with stops, backdrop blur, vector shape holes and strokes.</td></tr>
+  </table></div>
+
+  <h2>Debug settings</h2>
+  <div class="tblwrap"><table>
+    <tr><th>CVar</th><th>Default</th><th>Description</th></tr>
+    <tr><td><code>GameUi.ShowPointerRay</code></td><td>off</td><td>Draws where the pointer ray hits world-space
+      canvases.</td></tr>
+    <tr><td><code>Rendering.GuiBackdropBlur</code></td><td>on</td><td>Blurs the scene behind elements with a
+      Backdrop Blur.</td></tr>
+  </table></div>
+</div>
+</body>
+</html>

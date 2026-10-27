@@ -1,63 +1,20 @@
 #include <EditorPluginGameUi/EditorPluginGameUiPCH.h>
 
-#include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
-#include <EditorPluginGameUi/UiFontAsset/UiFontAssetWindow.moc.h>
+#include <EditorFramework/Assets/AssetDocument.h>
+#include <EditorPluginGameUi/UiFontAsset/UiFontAssetWindow.h>
+#include <EditorPluginGameUi/UiFontAsset/UiFontPreviewView.h>
 #include <Foundation/Strings/TranslationLookup.h>
-#include <GuiFoundation/ActionViews/MenuBarActionMapView.moc.h>
-#include <GuiFoundation/ActionViews/ToolBarActionMapView.moc.h>
-#include <GuiFoundation/DockPanels/DocumentPanel.moc.h>
-#include <GuiFoundation/PropertyGrid/PropertyGridWidget.moc.h>
-#include <QLayout>
 
-plQtUiFontAssetDocumentWindow::plQtUiFontAssetDocumentWindow(plDocument* pDocument)
-  : plQtDocumentWindow(pDocument)
+plUiFontAssetDocumentWindow::plUiFontAssetDocumentWindow(plDocument* pDocument)
+  : plDocumentWindow(pDocument)
 {
-  // Menu Bar
-  {
-    plQtMenuBarActionMapView* pMenuBar = static_cast<plQtMenuBarActionMapView*>(menuBar());
-    plActionContext context;
-    context.m_sMapping = "UiFontAssetMenuBar";
-    context.m_pDocument = pDocument;
-    context.m_pWindow = this;
-    pMenuBar->SetActionContext(context);
-  }
+  SetMenuBarActions("UiFontAssetMenuBar");
+  SetToolBarActions("UiFontAssetToolBar");
 
-  // Tool Bar
-  {
-    plQtToolBarActionMapView* pToolBar = new plQtToolBarActionMapView("Toolbar", this);
-    plActionContext context;
-    context.m_sMapping = "UiFontAssetToolBar";
-    context.m_pDocument = pDocument;
-    context.m_pWindow = this;
-    pToolBar->SetActionContext(context);
-    pToolBar->setObjectName("UiFontAssetWindowToolBar");
-    addToolBar(pToolBar);
-  }
+  AddPropertiesPanel({"Properties", plTranslate("GameUi.Panel.FontProperties")});
 
-  // Property Grid
-  {
-    plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, pDocument);
-    pPropertyPanel->setObjectName("UiFontAssetDockWidget");
-    pPropertyPanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.FontProperties")));
-    pPropertyPanel->show();
+  // W5-D12: the baked font, docked below the properties (plUiDocumentShellPanels)
+  AddPanel<plUiFontPreviewView>({"FontPreview", "Preview"}, static_cast<plAssetDocument*>(pDocument));
 
-    plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, pDocument);
-
-    QWidget* pWidget = new QWidget();
-    pWidget->setObjectName("Group");
-    pWidget->setLayout(new QVBoxLayout());
-    pWidget->setContentsMargins(0, 0, 0, 0);
-
-    pWidget->layout()->setContentsMargins(0, 0, 0, 0);
-    pWidget->layout()->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
-    pWidget->layout()->addWidget(pPropertyGrid);
-
-    pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
-
-    m_pDockManager->addDockWidgetTab(ads::CenterDockWidgetArea, pPropertyPanel);
-
-    pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
-  }
-
-  FinishWindowCreation();
+  pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
 }

@@ -1,0 +1,29 @@
+:root {
+  --bg: #0f141a; --panel: #161d25; --panel2: #1b242e; --ink: #dbe4ec; --muted: #8698a9;
+  --line: #263442; --accent: #b996cd; --amber: #d9a35c; --ok: #79c98f; --code-bg: #10171e;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: "Segoe UI", system-ui, sans-serif; font-size: 15.5px; line-height: 1.65; }
+a { color: var(--accent); }
+.wrap { max-width: 920px; margin: 0 auto; padding: 44px 28px 90px; }
+h1, h2, h3, .crumbs { font-family: "Bahnschrift", "Arial Narrow", sans-serif; }
+.crumbs { text-transform: uppercase; letter-spacing: 0.14em; font-size: 12px; color: var(--muted); margin: 0 0 10px; }
+.crumbs a { color: var(--muted); }
+h1 { font-size: 34px; margin: 0 0 14px; }
+h2 { font-size: 22px; letter-spacing: 0.02em; margin: 46px 0 10px; text-transform: uppercase; }
+h3 { font-size: 17px; margin: 26px 0 6px; }
+p, li { max-width: 78ch; }
+code { font-family: "Cascadia Code", "Consolas", monospace; font-size: 0.86em; background: var(--code-bg); border: 1px solid var(--line); padding: 1px 5px; border-radius: 2px; }
+table { border-collapse: collapse; width: 100%; background: var(--panel); }
+.tblwrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 3px; margin: 16px 0; }
+th { text-align: left; font-family: "Bahnschrift", "Arial Narrow", sans-serif; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); padding: 9px 13px; border-bottom: 2px solid var(--line); background: var(--panel2); }
+td { padding: 9px 13px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 14px; }
+td:first-child { white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+tr.grp td { background: var(--panel2); color: var(--muted); font-family: "Bahnschrift", "Arial Narrow", sans-serif; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; padding: 6px 13px; }
+.note { border-left: 3px solid var(--accent); background: var(--panel); padding: 10px 16px; margin: 16px 0; font-size: 14px; max-width: 78ch; }
+.note.warn { border-left-color: var(--amber); }
+.note .nh { font-family: "Bahnschrift", "Arial Narrow", sans-serif; font-size: 11.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+ol.steps li { margin: 8px 0; }
+.seealso { margin-top: 48px; border-top: 1px dashed var(--line); padding-top: 16px; font-size: 14px; color: var(--muted); }

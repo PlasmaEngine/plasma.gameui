@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Text and Brush Effects — PlasmaEngine2 Manual</title>
+<link rel="stylesheet" href="manual.css" />
+</head>
+<body>
+<div class="wrap">
+  <p class="crumbs"><a href="index.html">Manual</a> / <a href="index.html">Game UI</a> / Text and Brush Effects</p>
+  <h1>Text and Brush Effects</h1>
+
+  <p>
+    Text elements can have an outline and a soft drop shadow. Panels, buttons and every other element with a
+    brush can have angled and radial gradients with any number of colour stops, and can blur the scene behind
+    them. Vector shapes can have holes and an outline stroke. All of these are drawn by the UI shaders in one
+    pass, with no extra textures.
+  </p>
+
+  <h2>Text outline and shadow</h2>
+  <p>
+    Outline and shadow come from the font's distance field, so they stay sharp at any size. The outline grows
+    outward from the glyph edge by <code>OutlineWidth</code> pixels. The shadow is the glyph drawn behind it,
+    offset by <code>ShadowOffset</code> and blurred by <code>ShadowSoftness</code>. A shadow colour with zero alpha,
+    the default, turns the shadow off.
+  </p>
+  <div class="tblwrap"><table>
+    <tr><th>Property</th><th>Default</th><th>Description</th></tr>
+    <tr><td><code>OutlineWidth</code></td><td>0 px</td><td>Width of the outline outside the glyph edge (0&ndash;16).</td></tr>
+    <tr><td><code>OutlineColor</code></td><td>black</td><td>Colour of the outline.</td></tr>
+    <tr><td><code>ShadowColor</code></td><td>transparent</td><td>Colour of the drop shadow. Alpha 0 = no shadow.</td></tr>
+    <tr><td><code>ShadowOffset</code></td><td>(1, 2) px</td><td>Shadow offset, right and down.</td></tr>
+    <tr><td><code>ShadowSoftness</code></td><td>1 px</td><td>Blur of the shadow's edge (0&ndash;16).</td></tr>
+    <tr><td><code>LetterSpacing</code></td><td>0 px</td><td>Space added after each character.</td></tr>
+    <tr><td><code>LineHeight</code></td><td>1</td><td>Line height as a multiple of the font's.</td></tr>
+  </table></div>
+  <div class="note"><div class="nh">Note</div>
+    The reach of an outline and a shadow is limited by the font's distance field, which spans 16 px at the font's
+    base size. At large font sizes the limit grows with the size.
+  </div>
+
+  <h2>Gradients</h2>
+  <p>
+    <code>GradientMode</code> picks the gradient. <b>Horizontal</b> and <b>Vertical</b> blend <code>Color</code>
+    into <code>GradientColor</code>. <b>Angled</b> and <b>Radial</b> use the <code>GradientStops</code>: each stop
+    has a <code>Position</code> from 0 to 1 and a colour. Without stops they blend Color into GradientColor.
+  </p>
+  <ul>
+    <li><b>Angled</b> runs the stops along <code>GradientAngle</code>: 0&deg; is left to right, 90&deg; top to
+      bottom.</li>
+    <li><b>Radial</b> runs them from the rect's centre (0) to its edge (1), as an ellipse that fits the rect.</li>
+  </ul>
+  <p>
+    Gradients follow the brush's rounded corners and are tinted by the element's state colour and opacity. Styles
+    can set gradient stops and an angle too. The inspector shows Gradient Color with any gradient, the stops with
+    Angled and Radial, and the angle with Angled only.
+  </p>
+
+  <h2 id="backdrop">Backdrop Blur</h2>
+  <p>
+    <code>BackdropBlur</code> blurs the scene behind an element's shape by about that many pixels, for frosted
+    glass panels. The element's own fill draws over the blur, so a fill colour with partial alpha tints the glass.
+  </p>
+  <ul>
+    <li>Only screen-space canvases blur. Other UI drawn on the same canvas is not part of the blurred image: the blur
+      shows the scene, not the UI under the element.</li>
+    <li>The view computes the blur only while at least one element on screen asks for it. It costs a chain of
+      downsampling passes, starting at half the view's resolution.</li>
+    <li><code>Rendering.GuiBackdropBlur 0</code> turns the blur off; elements then draw without it.</li>
+  </ul>
+
+  <h2>Vector shapes</h2>
+  <p>
+    A Vector Shape's <code>PathData</code> uses SVG path syntax. Every subpath with three or more points is filled.
+    <code>FillRule</code> decides how subpaths combine:
+  </p>
+  <div class="tblwrap"><table>
+    <tr><th>Fill rule</th><th>Result</th></tr>
+    <tr><td>Separate Shapes</td><td>Each subpath is filled on its own.</td></tr>
+    <tr><td>Even-Odd (Holes)</td><td>A point is filled when it lies inside an odd number of subpaths, so a subpath
+      inside another cuts a hole: the inside of a ring, the counter of a letter.</td></tr>
+  </table></div>
+  <p>
+    <code>StrokeWidth</code> above 0 draws an outline of that width along every subpath in
+    <code>StrokeColor</code>, over the fill. Subpaths closed with <code>Z</code> get a closed outline.
+  </p>
+
+  <h2>Property reference</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Property</th><th>Default</th><th>Description</th></tr>
+    <tr class="grp"><td colspan="3">Brush (panels, buttons, images and other visual elements)</td></tr>
+    <tr><td><code>GradientMode</code></td><td>None</td><td>None, Horizontal, Vertical, Angled or Radial.</td></tr>
+    <tr><td><code>GradientColor</code></td><td>grey</td><td>End colour of a two-colour gradient.</td></tr>
+    <tr><td><code>GradientStops</code></td><td>empty</td><td>Colour stops of Angled and Radial gradients.</td></tr>
+    <tr><td><code>GradientAngle</code></td><td>0&deg;</td><td>Direction of an Angled gradient.</td></tr>
+    <tr><td><code>BackdropBlur</code></td><td>0 px</td><td>Blur of the scene behind the shape (0&ndash;64). Screen
+      canvases only.</td></tr>
+    <tr class="grp"><td colspan="3">Vector Shape</td></tr>
+    <tr><td><code>FillRule</code></td><td>Separate Shapes</td><td>How subpaths combine (see above).</td></tr>
+    <tr><td><code>StrokeWidth</code></td><td>0 px</td><td>Width of the outline; 0 = none.</td></tr>
+    <tr><td><code>StrokeColor</code></td><td>white</td><td>Colour of the outline.</td></tr>
+  </table></div>
+
+  <div class="seealso">
+    See also: <a href="FontsAndCharacters.html">Fonts and Characters</a> &middot;
+    <a href="FitAndTextFit.html">Fit to Content and Text Fit</a>
+  </div>
+</div>
+</body>
+</html>

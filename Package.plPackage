@@ -8,25 +8,26 @@
 PackageInfo
 {
 	string %Id{"plasma.gameui"}
-	string %Version{"1.1.5"}
+	string %Version{"1.4.1"}
 	string %Publisher{"PlasmaTechnology"}
 	string %License{"MIT"}
 	string %Homepage{"https://plasmagameengine.com"}
 
-	string %MinEngineVersion{"0.9.2"}
-	string %MaxEngineVersion{"0.9.2"}
-	string %AbiTag{"win64-msvc19-0.9.2-abi2-dev"}
+	string %MinEngineVersion{"0.11.2"}
+	string %MaxEngineVersion{"0.11.2"}
+	string %AbiTag{"win64-msvc19-0.11.2-abi6-dev"}
 
 	string %DisplayName{"Game UI"}
 	string %Category{"UI"}
-	string %Description{"Engine-native game UI framework: UI Document assets, widget tree, batched 2D renderer and canvas components.
+	string %Description{"Engine-native game UI framework: UI Document, UI Style and UI Font assets with a visual canvas editor, text that fits its content, a Text fit report per language, and world-space canvases for terminals, signs and nameplates.
 
-FreeType ships with the package under the FreeType License; the font asset uses it to rasterise glyphs."}
+The Game UI runtime (plGameUiPlugin) ships with the engine; this package adds its editor. FreeType ships with the package under the FreeType License; the font asset uses it to rasterise glyphs."}
 	string %Icon{"Branding/GameUiIcon.png"}
 	string %Banner{"Branding/GameUiBanner.png"}
 
 	string %EditorPlugins{"plEditorPluginGameUi"}
 	string %EditorEnginePlugins{"plEnginePluginGameUi"}
+	// The runtime is built by the engine (its editor UI runs on it); listing it here is what loads it in a game.
 	string %RuntimePlugins{"plGameUiPlugin"}
 	string %PackageDependencies{"freetype.dll", "freetype-LICENSE.txt"}
 
@@ -34,16 +35,12 @@ FreeType ships with the package under the FreeType License; the font asset uses 
 	// The editor plugin builds on EditorPluginAssets, so it must load after it.
 	Requires { string %Id{"plasma.assets"} string %Range{"^1.0"} }
 
-	// ---- assets ---------------------------------------------------------------
-	// Mounted as a data directory when the package is installed. The layout below Assets/
-	// mirrors where this content sat inside the engine, so every shader include, shape icon
-	// lookup and asset reference resolves exactly as it did before.
-	Mount { string %Path{"Assets"} string %RootName{"plasma.gameui"} bool %Writable{false} }
-
-	Component { string %Name{"assets"} string %Platform{"any"} }
+	// ---- components -----------------------------------------------------------
+	// The Game UI shaders ship with the engine's runtime (Data/Base/Shaders), so the package mounts no assets.
 	Component { string %Name{"manifest"} string %Platform{"any"} }
 	Component { string %Name{"runtime-win64"} string %Platform{"win64"} }
 	Component { string %Name{"editor-win64"} string %Platform{"win64"} }
 	Component { string %Name{"icon"} string %Platform{"any"} }
 	Component { string %Name{"banner"} string %Platform{"any"} }
+	Component { string %Name{"tool"} string %Platform{"any"} string %Path{"EditorIcons"} }
 }

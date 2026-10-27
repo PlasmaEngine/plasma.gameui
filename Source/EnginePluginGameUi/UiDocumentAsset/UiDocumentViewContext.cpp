@@ -29,7 +29,13 @@ void plUiDocumentViewContext::SetCamera(const plViewRedrawMsgToEngine* pMsg)
 {
   plEngineProcessViewContext::SetCamera(pMsg);
 
-  DrawSelectionGizmos(static_cast<float>(pMsg->m_uiWindowWidth), static_cast<float>(pMsg->m_uiWindowHeight));
+  m_fWindowWidth = static_cast<float>(pMsg->m_uiWindowWidth);
+  m_fWindowHeight = static_cast<float>(pMsg->m_uiWindowHeight);
+}
+
+void plUiDocumentViewContext::DrawSelectionGizmos() const
+{
+  DrawSelectionGizmos(m_fWindowWidth, m_fWindowHeight);
 }
 
 void plUiDocumentViewContext::DrawSelectionGizmos(float fViewWidth, float fViewHeight) const
@@ -50,6 +56,7 @@ void plUiDocumentViewContext::DrawSelectionGizmos(float fViewWidth, float fViewH
   plVec2 vOffset = plVec2::MakeZero();
   plVec2 vCanvasSize = plVec2::MakeZero();
   plHybridArray<plUiFocusable, 32> focusables;
+  plUiLayoutContext layoutContext;
   {
     // const world so the const TryGetComponent overload is used (write-access assert otherwise)
     const plWorld* pWorld = m_pUiDocumentContext->GetWorld();
@@ -60,6 +67,9 @@ void plUiDocumentViewContext::DrawSelectionGizmos(float fViewWidth, float fViewH
       return;
 
     pComponent->ComputeCanvasTransform(plVec2(fViewWidth, fViewHeight), fScale, vOffset, vCanvasSize);
+
+    // the selection is placed where the preview draws it (fit content measures the displayed texts)
+    layoutContext = pComponent->GetLayoutContext();
 
     if (m_pUiDocumentContext->GetShowNavGraph())
     {
@@ -194,13 +204,15 @@ void plUiDocumentViewContext::DrawSelectionGizmos(float fViewWidth, float fViewH
     }
   }
 
+  DrawTextFitMarks(debugContext, fScale, vOffset);
+
   const auto& selectedPaths = m_pUiDocumentContext->GetSelectedElementPaths();
 
   for (const auto& path : selectedPaths)
   {
     const plUiElement* pElement = pResource->GetRoot();
     const plUiElement* pParentElement = nullptr;
-    plRectFloat rect = pElement->ComputeRect(canvasRect);
+    plRectFloat rect = pElement->ComputeRect(canvasRect, &layoutContext);
     plRectFloat parentRect = rect;
 
     bool bValid = true;
@@ -215,7 +227,7 @@ void plUiDocumentViewContext::DrawSelectionGizmos(float fViewWidth, float fViewH
       parentRect = rect;
       pParentElement = pElement;
       pElement = pElement->m_Children[uiIndex];
-      rect = plUiLayout::ComputeChildRect(pParentElement, pElement, parentRect, uiIndex);
+      rect = plUiLayout::ComputeChildRect(pParentElement, pElement, parentRect, uiIndex, &layoutContext);
     }
 
     if (!bValid)
@@ -308,6 +320,29 @@ void plUiDocumentViewContext::DrawSelectionGizmos(float fViewWidth, float fViewH
       }
 
       plDebugRenderer::Draw2DLines(debugContext, lines, selectionColor);
+    }
+  }
+}
+
+void plUiDocumentViewContext::DrawTextFitMarks(const plDebugRendererContext& context, float fScale, const plVec2& vOffset) const
+{
+  // the danger colour of the editor theme (the Text fit list uses it for the same issues)
+  const plColor markColor = plColorGammaUB(0xD7, 0x82, 0x78);
+  constexpr float fRadius = 3.5f;
+  constexpr float fInset = 3.0f;
+
+  for (const plUiTextFitIssue& issue : m_pUiDocumentContext->GetTextFitIssues())
+  {
+    if (issue.m_Kind == plUiTextFitIssue::Kind::Shrunk)
+      continue;
+
+    const plVec2 vCenter((issue.m_Rect.x + issue.m_Rect.width) * fScale + vOffset.x - fInset - fRadius, issue.m_Rect.y * fScale + vOffset.y + fInset + fRadius);
+
+    // a disc from one-pixel rows
+    for (float fY = -fRadius; fY <= fRadius; fY += 1.0f)
+    {
+      const float fHalf = plMath::Sqrt(plMath::Max(fRadius * fRadius - fY * fY, 0.0f));
+      plDebugRenderer::Draw2DRectangle(context, plRectFloat(vCenter.x - fHalf, vCenter.y + fY, fHalf * 2.0f, 1.0f), 0.0f, markColor);
     }
   }
 }

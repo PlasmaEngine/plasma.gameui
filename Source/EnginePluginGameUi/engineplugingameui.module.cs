@@ -9,6 +9,7 @@ public class EnginePluginGameUiModule : ModuleRules
             "BUILDSYSTEM_BUILDING_ENGINEPLUGINGAMEUI_LIB");
 
         PlasmaPackageSdk.ConfigureEditorSdkConsumer(this, context);
-        PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/GameUiPlugin", "plGameUiPlugin");
+        // The GameUi runtime ships with the engine.
+        PlasmaPackageSdk.AddImportLibrary(this, context, "plGameUiPlugin");
     }
 }

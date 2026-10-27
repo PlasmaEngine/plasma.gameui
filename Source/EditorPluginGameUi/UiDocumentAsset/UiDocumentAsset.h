@@ -12,10 +12,13 @@ public:
 
   /// \brief Serializes the compiled UI document resource data (widget tree) into the stream.
   ///
-  /// Used both by the asset transform and by the live-preview resource update.
+  /// Used by the live-preview resource update. The asset transform writes the same data and also logs the Text fit
+  /// warnings.
   plStatus WriteAsset(plStreamWriter& inout_stream) const;
 
 protected:
+  virtual void UpdateAssetDocumentInfo(plAssetDocumentInfo* pInfo) const override;
+
   virtual plTransformStatus InternalTransformAsset(plStreamWriter& stream, plStringView sOutputTag, const plPlatformProfile* pAssetProfile,
     const plAssetFileHeader& AssetHeader, plBitflags<plTransformFlags> transformFlags) override;
 

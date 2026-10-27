@@ -1,7 +1,10 @@
 #include <EditorPluginGameUi/EditorPluginGameUiPCH.h>
 
 #include <EditorPluginGameUi/UiDocumentAsset/UiDocumentAsset.h>
+#include <EditorPluginGameUi/UiDocumentAsset/UiLocalization.h>
 #include <Foundation/Serialization/ReflectionSerializer.h>
+#include <Foundation/Strings/TranslationLookup.h>
+#include <GameUiPlugin/Elements/UiTextFit.h>
 #include <GameUiPlugin/Resources/UiDocumentResource.h>
 
 namespace
@@ -127,6 +130,105 @@ namespace
       ValidateFlowRecursive(pElement, properties, sDocumentPath);
     }
   }
+
+  void CreateDescriptor(const plUiDocumentAssetProperties& properties, plUiDocumentResourceDescriptor& out_desc)
+  {
+    // the document edits the children of an implicit full-canvas root panel
+    plUiPanel* pRoot = PL_DEFAULT_NEW(plUiPanel);
+    pRoot->m_sName = "Root";
+    pRoot->m_Color = plColorGammaUB(0, 0, 0, 0); // invisible background
+    pRoot->m_vAnchorMin = plVec2::MakeZero();    // stretch across the whole canvas
+    pRoot->m_vAnchorMax = plVec2(1.0f, 1.0f);
+    pRoot->m_vOffsets = plVec4::MakeZero();
+    out_desc.m_pRoot = pRoot;
+
+    for (const plUiElement* pChild : properties.m_Children)
+    {
+      if (pChild == nullptr)
+        continue;
+
+      void* pClone = plReflectionSerializer::Clone(pChild, pChild->GetDynamicRTTI());
+      pRoot->m_Children.PushBack(static_cast<plUiElement*>(pClone));
+    }
+
+    // animation clips
+    for (const plUiAnimationClip* pClip : properties.m_Animations)
+    {
+      if (pClip == nullptr)
+        continue;
+
+      void* pClone = plReflectionSerializer::Clone(pClip, pClip->GetDynamicRTTI());
+      out_desc.m_Clips.PushBack(static_cast<plUiAnimationClip*>(pClone));
+    }
+  }
+
+  /// The canvas size the transform checks the texts at.
+  constexpr float s_fTextFitWidth = 1920.0f;
+  constexpr float s_fTextFitHeight = 1080.0f;
+
+  /// The most text fit warnings one language logs; the rest are counted.
+  constexpr plUInt32 s_uiMaxTextFitWarnings = 20;
+
+  /// The name a text fit issue is reported under: the button or toggle a label belongs to, else the text.
+  plStringView GetIssueElementName(const plUiElement* pRoot, const plUiTextFitIssue& issue)
+  {
+    const plUiElement* pElement = pRoot;
+    const plUiElement* pParent = nullptr;
+
+    for (plUInt32 uiChild : issue.m_Path)
+    {
+      if (uiChild >= pElement->m_Children.GetCount() || pElement->m_Children[uiChild] == nullptr)
+        break;
+
+      pParent = pElement;
+      pElement = pElement->m_Children[uiChild];
+    }
+
+    const bool bControlLabel = pParent != nullptr && (pParent->GetDynamicRTTI() == plGetStaticRTTI<plUiButton>() || pParent->GetDynamicRTTI() == plGetStaticRTTI<plUiToggle>());
+    return bControlLabel ? pParent->m_sName.GetView() : pElement->m_sName.GetView();
+  }
+
+  void LogTextFit(const plUiElement* pRoot, const plUiLayoutContext& context, plStringView sLanguage)
+  {
+    plDynamicArray<plUiTextFitIssue> issues;
+    plUiTextFit::Analyze(pRoot, plRectFloat(0, 0, s_fTextFitWidth, s_fTextFitHeight), context, issues);
+
+    plUInt32 uiLogged = 0;
+    for (const plUiTextFitIssue& issue : issues)
+    {
+      // a shrunk text fits; the preview shows it, the transform does not warn
+      if (issue.m_Kind == plUiTextFitIssue::Kind::Shrunk)
+        continue;
+
+      if (uiLogged == s_uiMaxTextFitWarnings)
+      {
+        plLog::Warning("Text fit ({}): more texts do not fit; the UI Document editor's Text fit list shows all of them.", sLanguage);
+        break;
+      }
+
+      plLog::Warning("Text fit ({}): {}", sLanguage, plUiTextFit::Describe(issue, GetIssueElementName(pRoot, issue)));
+      ++uiLogged;
+    }
+  }
+
+  /// Warns about every text that does not fit at 1920x1080: once with the authored texts, once per language of the
+  /// project's string tables.
+  void CheckTextFit(const plUiElement* pRoot)
+  {
+    plUiLayoutContext context;
+    context.m_bWaitForFonts = true;
+    LogTextFit(pRoot, context, "authored");
+
+    plDynamicArray<plGameUiLocalization::Language> languages;
+    plGameUiLocalization::CollectLanguages(languages);
+
+    for (const plGameUiLocalization::Language& language : languages)
+    {
+      plUniquePtr<plTranslatorFromFiles> pTranslator = plGameUiLocalization::CreateTranslator(language);
+      context.m_pTranslator = pTranslator.Borrow();
+      LogTextFit(pRoot, context, language.m_sName);
+    }
+  }
 } // namespace
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plUiDocumentAssetDocument, 1, plRTTINoAllocator)
@@ -143,34 +245,7 @@ plStatus plUiDocumentAssetDocument::WriteAsset(plStreamWriter& inout_stream) con
   ValidateFlow(*pProp, GetDocumentPath());
 
   plUiDocumentResourceDescriptor desc;
-
-  // the document edits the children of an implicit full-canvas root panel
-  plUiPanel* pRoot = PL_DEFAULT_NEW(plUiPanel);
-  pRoot->m_sName = "Root";
-  pRoot->m_Color = plColorGammaUB(0, 0, 0, 0); // invisible background
-  pRoot->m_vAnchorMin = plVec2::MakeZero();    // stretch across the whole canvas
-  pRoot->m_vAnchorMax = plVec2(1.0f, 1.0f);
-  pRoot->m_vOffsets = plVec4::MakeZero();
-  desc.m_pRoot = pRoot;
-
-  for (const plUiElement* pChild : pProp->m_Children)
-  {
-    if (pChild == nullptr)
-      continue;
-
-    void* pClone = plReflectionSerializer::Clone(pChild, pChild->GetDynamicRTTI());
-    pRoot->m_Children.PushBack(static_cast<plUiElement*>(pClone));
-  }
-
-  // animation clips
-  for (const plUiAnimationClip* pClip : pProp->m_Animations)
-  {
-    if (pClip == nullptr)
-      continue;
-
-    void* pClone = plReflectionSerializer::Clone(pClip, pClip->GetDynamicRTTI());
-    desc.m_Clips.PushBack(static_cast<plUiAnimationClip*>(pClone));
-  }
+  CreateDescriptor(*pProp, desc);
 
   if (desc.Save(inout_stream).Failed())
   {
@@ -180,9 +255,31 @@ plStatus plUiDocumentAssetDocument::WriteAsset(plStreamWriter& inout_stream) con
   return plStatus(PL_SUCCESS);
 }
 
+void plUiDocumentAssetDocument::UpdateAssetDocumentInfo(plAssetDocumentInfo* pInfo) const
+{
+  SUPER::UpdateAssetDocumentInfo(pInfo);
+
+  // the transform's Text fit warnings check every language
+  plGameUiLocalization::AddTableDependencies(pInfo->m_TransformDependencies);
+}
+
 plTransformStatus plUiDocumentAssetDocument::InternalTransformAsset(plStreamWriter& stream, plStringView sOutputTag, const plPlatformProfile* pAssetProfile, const plAssetFileHeader& AssetHeader, plBitflags<plTransformFlags> transformFlags)
 {
-  return WriteAsset(stream);
+  const plUiDocumentAssetProperties* pProp = GetProperties();
+  ValidateFlow(*pProp, GetDocumentPath());
+
+  plUiDocumentResourceDescriptor desc;
+  CreateDescriptor(*pProp, desc);
+
+  // only the transform checks the text fit; the editor's preview writes the asset without it
+  CheckTextFit(desc.m_pRoot);
+
+  if (desc.Save(stream).Failed())
+  {
+    return plStatus("Failed to serialize UI document descriptor");
+  }
+
+  return plStatus(PL_SUCCESS);
 }
 
 plTransformStatus plUiDocumentAssetDocument::InternalCreateThumbnail(const ThumbnailInfo& ThumbnailInfo)

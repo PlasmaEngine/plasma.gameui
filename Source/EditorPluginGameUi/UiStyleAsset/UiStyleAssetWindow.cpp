@@ -1,118 +1,58 @@
 #include <EditorPluginGameUi/EditorPluginGameUiPCH.h>
 
 #include <EditorFramework/Assets/AssetCurator.h>
-#include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
-#include <EditorFramework/DocumentWindow/EngineViewWidget.moc.h>
+#include <EditorFramework/DocumentWindow/EngineViewWidget.h>
 #include <EditorFramework/InputContexts/EditorInputContext.h>
-#include <EditorPluginGameUi/UiStyleAsset/UiStyleAssetWindow.moc.h>
+#include <EditorPluginGameUi/UiStyleAsset/UiStyleAssetWindow.h>
 #include <Foundation/Strings/TranslationLookup.h>
 #include <Foundation/Utilities/AssetFileHeader.h>
-#include <GuiFoundation/ActionViews/MenuBarActionMapView.moc.h>
-#include <GuiFoundation/ActionViews/ToolBarActionMapView.moc.h>
-#include <GuiFoundation/DockPanels/DocumentPanel.moc.h>
-#include <GuiFoundation/PropertyGrid/PropertyGridWidget.moc.h>
 #include <ToolsFoundation/Selection/SelectionManager.h>
 
-#include <QLayout>
-#include <QMouseEvent>
-
-plQtUiStyleAssetDocumentWindow::plQtUiStyleAssetDocumentWindow(plAssetDocument* pDocument)
-  : plQtEngineDocumentWindow(pDocument)
+plUiStyleAssetDocumentWindow::plUiStyleAssetDocumentWindow(plAssetDocument* pDocument)
+  : plEngineDocumentWindow(pDocument)
 {
   m_pAssetDoc = static_cast<plUiStyleAssetDocument*>(pDocument);
 
-  // Menu Bar
-  {
-    plQtMenuBarActionMapView* pMenuBar = static_cast<plQtMenuBarActionMapView*>(menuBar());
-    plActionContext context;
-    context.m_sMapping = "UiStyleAssetMenuBar";
-    context.m_pDocument = pDocument;
-    context.m_pWindow = this;
-    pMenuBar->SetActionContext(context);
-  }
+  SetMenuBarActions("UiStyleAssetMenuBar");
+  SetToolBarActions("UiStyleAssetToolBar");
 
-  // Tool Bar
-  {
-    plQtToolBarActionMapView* pToolBar = new plQtToolBarActionMapView("Toolbar", this);
-    plActionContext context;
-    context.m_sMapping = "UiStyleAssetToolBar";
-    context.m_pDocument = pDocument;
-    context.m_pWindow = this;
-    pToolBar->SetActionContext(context);
-    pToolBar->setObjectName("UiStyleAssetWindowToolBar");
-    addToolBar(pToolBar);
-  }
-
-  // Central: live engine-rendered showcase
+  // the live engine-rendered showcase
   {
     m_ViewConfig.m_Camera.LookAt(plVec3(-1.6f, 0, 0), plVec3(0, 0, 0), plVec3(0, 0, 1));
     m_ViewConfig.ApplyPerspectiveSetting(90);
 
-    m_pViewWidget = new plQtEngineViewWidget(nullptr, this, &m_ViewConfig);
+    m_pViewWidget = new plEngineViewWidget(this, &m_ViewConfig);
     AddViewWidget(m_pViewWidget);
-    plQtViewWidgetContainer* pContainer = new plQtViewWidgetContainer(this, m_pViewWidget, nullptr);
-
-    plQtDocumentPanel* pCentralPanel = new plQtDocumentPanel(this, pDocument);
-    pCentralPanel->setObjectName("UiStyleAssetViewCentral");
-    pCentralPanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.StylePreview")));
-    pCentralPanel->setWidget(pContainer, ads::CDockWidget::ForceNoScrollArea);
-
-    m_pDockManager->setCentralWidget(pCentralPanel);
-
-    m_pViewWidget->installEventFilter(this);
-    m_pViewWidget->setMouseTracking(true); // hover states in the preview
+    m_pViewWidget->m_InputEvents.AddEventHandler(plMakeDelegate(&plUiStyleAssetDocumentWindow::OnViewInput, this));
   }
 
-  // Property Grid
-  {
-    plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, pDocument);
-    pPropertyPanel->setObjectName("UiStyleAssetDockWidget");
-    pPropertyPanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.StyleProperties")));
-    pPropertyPanel->show();
-
-    plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, pDocument);
-
-    QWidget* pWidget = new QWidget();
-    pWidget->setObjectName("Group");
-    pWidget->setLayout(new QVBoxLayout());
-    pWidget->setContentsMargins(0, 0, 0, 0);
-
-    pWidget->layout()->setContentsMargins(0, 0, 0, 0);
-    pWidget->layout()->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
-    pWidget->layout()->addWidget(pPropertyGrid);
-
-    pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
-
-    m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
-
-    pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
-  }
+  // the shell's properties panel follows the selection
+  pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
 
   // live preview: push the style to the engine resource on every edit
-  m_pAssetDoc->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plQtUiStyleAssetDocumentWindow::PropertyEventHandler, this));
-  plEditorEngineProcessConnection::s_Events.AddEventHandler(plMakeDelegate(&plQtUiStyleAssetDocumentWindow::EngineProcessEventHandler, this));
-
-  FinishWindowCreation();
+  m_pAssetDoc->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plUiStyleAssetDocumentWindow::PropertyEventHandler, this));
+  plEditorEngineProcessConnection::s_Events.AddEventHandler(plMakeDelegate(&plUiStyleAssetDocumentWindow::EngineProcessEventHandler, this));
 
   UpdatePreview();
 }
 
-plQtUiStyleAssetDocumentWindow::~plQtUiStyleAssetDocumentWindow()
+plUiStyleAssetDocumentWindow::~plUiStyleAssetDocumentWindow()
 {
-  m_pAssetDoc->GetObjectManager()->m_PropertyEvents.RemoveEventHandler(plMakeDelegate(&plQtUiStyleAssetDocumentWindow::PropertyEventHandler, this));
-  plEditorEngineProcessConnection::s_Events.RemoveEventHandler(plMakeDelegate(&plQtUiStyleAssetDocumentWindow::EngineProcessEventHandler, this));
+  m_pViewWidget->m_InputEvents.RemoveEventHandler(plMakeDelegate(&plUiStyleAssetDocumentWindow::OnViewInput, this));
+  m_pAssetDoc->GetObjectManager()->m_PropertyEvents.RemoveEventHandler(plMakeDelegate(&plUiStyleAssetDocumentWindow::PropertyEventHandler, this));
+  plEditorEngineProcessConnection::s_Events.RemoveEventHandler(plMakeDelegate(&plUiStyleAssetDocumentWindow::EngineProcessEventHandler, this));
 
   RestoreResource();
 }
 
-void plQtUiStyleAssetDocumentWindow::InternalRedraw()
+void plUiStyleAssetDocumentWindow::InternalRedraw()
 {
   plEditorInputContext::UpdateActiveInputContext();
   SendRedrawMsg();
-  plQtEngineDocumentWindow::InternalRedraw();
+  plEngineDocumentWindow::InternalRedraw();
 }
 
-void plQtUiStyleAssetDocumentWindow::SendRedrawMsg()
+void plUiStyleAssetDocumentWindow::SendRedrawMsg()
 {
   // do not try to redraw while the process is crashed, it is obviously futile
   if (plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
@@ -126,7 +66,7 @@ void plQtUiStyleAssetDocumentWindow::SendRedrawMsg()
   }
 }
 
-void plQtUiStyleAssetDocumentWindow::UpdatePreview()
+void plUiStyleAssetDocumentWindow::UpdatePreview()
 {
   if (plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
     return;
@@ -160,7 +100,7 @@ void plQtUiStyleAssetDocumentWindow::UpdatePreview()
   }
 }
 
-void plQtUiStyleAssetDocumentWindow::RestoreResource()
+void plUiStyleAssetDocumentWindow::RestoreResource()
 {
   plRestoreResourceMsgToEngine msg;
   msg.m_sResourceType = "UI Style";
@@ -171,12 +111,12 @@ void plQtUiStyleAssetDocumentWindow::RestoreResource()
   plEditorEngineProcessConnection::GetSingleton()->SendMessage(&msg);
 }
 
-void plQtUiStyleAssetDocumentWindow::PropertyEventHandler(const plDocumentObjectPropertyEvent& e)
+void plUiStyleAssetDocumentWindow::PropertyEventHandler(const plDocumentObjectPropertyEvent& e)
 {
   UpdatePreview();
 }
 
-void plQtUiStyleAssetDocumentWindow::EngineProcessEventHandler(const plEditorEngineProcessConnection::Event& e)
+void plUiStyleAssetDocumentWindow::EngineProcessEventHandler(const plEditorEngineProcessConnection::Event& e)
 {
   if (e.m_Type == plEditorEngineProcessConnection::Event::Type::ProcessRestarted)
   {
@@ -184,43 +124,41 @@ void plQtUiStyleAssetDocumentWindow::EngineProcessEventHandler(const plEditorEng
   }
 }
 
-void plQtUiStyleAssetDocumentWindow::SendMouseState(const QPoint& viewPos, bool bButtonDown, float fWheelTicks /*= 0.0f*/)
+void plUiStyleAssetDocumentWindow::SendMouseState(const plVec2& vViewPos, bool bButtonDown, float fWheelTicks /*= 0.0f*/)
 {
-  const float fWidth = static_cast<float>(m_pViewWidget->width());
-  const float fHeight = static_cast<float>(m_pViewWidget->height());
+  const plVec2 vSize = m_pViewWidget->GetViewportSize();
 
-  if (fWidth <= 0.0f || fHeight <= 0.0f)
+  if (vSize.x <= 0.0f || vSize.y <= 0.0f)
     return;
 
   plDocumentConfigMsgToEngine msg;
   msg.m_sWhatToDo = "UiMouse";
 
   plStringBuilder sValue;
-  sValue.SetFormat("{};{};{};{}", plMath::Clamp(viewPos.x() / fWidth, 0.0f, 1.0f), plMath::Clamp(viewPos.y() / fHeight, 0.0f, 1.0f), bButtonDown ? 1 : 0, fWheelTicks);
+  sValue.SetFormat("{};{};{};{}", plMath::Clamp(vViewPos.x / vSize.x, 0.0f, 1.0f), plMath::Clamp(vViewPos.y / vSize.y, 0.0f, 1.0f), bButtonDown ? 1 : 0, fWheelTicks);
   msg.m_sValue = sValue.GetData();
 
   GetEditorEngineConnection()->SendMessage(&msg);
 }
 
-bool plQtUiStyleAssetDocumentWindow::eventFilter(QObject* pObject, QEvent* pEvent)
+void plUiStyleAssetDocumentWindow::OnViewInput(const plEditorInputEvent& e)
 {
-  if (pObject == m_pViewWidget)
+  // the showcase is always interactive: forward pointer input (no camera controls here)
+  const bool bLeftHeld = e.IsHeld(plEditorInputEvent::LeftButton);
+
+  switch (e.m_Type)
   {
-    // the showcase is always interactive: forward pointer input (no camera controls here)
-    if (pEvent->type() == QEvent::MouseButtonPress || pEvent->type() == QEvent::MouseButtonRelease || pEvent->type() == QEvent::MouseMove)
-    {
-      QMouseEvent* pMouse = static_cast<QMouseEvent*>(pEvent);
-      SendMouseState(pMouse->position().toPoint(), pMouse->buttons().testFlag(Qt::LeftButton));
-      return true;
-    }
+    case plEditorInputEvent::Type::MousePress:
+    case plEditorInputEvent::Type::MouseRelease:
+    case plEditorInputEvent::Type::MouseMove:
+      SendMouseState(e.m_vPosition, bLeftHeld);
+      break;
 
-    if (pEvent->type() == QEvent::Wheel)
-    {
-      QWheelEvent* pWheel = static_cast<QWheelEvent*>(pEvent);
-      SendMouseState(pWheel->position().toPoint(), pWheel->buttons().testFlag(Qt::LeftButton), static_cast<float>(pWheel->angleDelta().y()) / 120.0f);
-      return true;
-    }
+    case plEditorInputEvent::Type::Wheel:
+      SendMouseState(e.m_vPosition, bLeftHeld, e.m_fWheel);
+      break;
+
+    default:
+      break;
   }
-
-  return plQtEngineDocumentWindow::eventFilter(pObject, pEvent);
 }

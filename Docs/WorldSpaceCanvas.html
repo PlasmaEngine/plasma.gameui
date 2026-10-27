@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>World-Space Canvases — PlasmaEngine2 Manual</title>
+<link rel="stylesheet" href="manual.css" />
+</head>
+<body>
+<div class="wrap">
+  <p class="crumbs"><a href="index.html">Manual</a> / <a href="index.html">Game UI</a> / World-Space Canvases</p>
+  <h1>World-Space Canvases</h1>
+
+  <p>
+    A UI Canvas normally draws over the screen. Set its <code>Space</code> to <b>World</b> and the same UI
+    Document draws on a panel in the scene instead: a terminal screen, a shop sign, a wrist display. The panel is
+    lit by nothing, sorts with other transparent geometry, is hidden by walls in front of it, and takes the mouse
+    and gamepad like a screen canvas when the player is close enough.
+  </p>
+
+  <h2>Spaces</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Space</th><th>Where the canvas draws</th></tr>
+    <tr><td>Screen</td><td>Over the view, scaled by <code>ScaleMode</code> and <code>ReferenceHeight</code>.</td></tr>
+    <tr><td>World</td><td>On a flat panel at the canvas object. The panel faces the object's +X axis: the object's
+      &minus;Y is the panel's right and &minus;Z its down, so a panel on an object with no rotation is read by a
+      camera looking along &minus;X.</td></tr>
+    <tr><td>Billboard</td><td>On a panel at the object that always faces the camera. Its right and up follow the
+      camera's.</td></tr>
+  </table></div>
+
+  <h2>Size and density</h2>
+  <p>
+    A world panel has a <code>Size</code> in metres and a <code>PixelsPerMetre</code> density. The UI Document is
+    laid out on a canvas of Size &times; PixelsPerMetre pixels: the defaults, 1.0 &times; 0.6 m at 500 px/m, give a
+    500 &times; 300 px canvas. Anchors and Fit content work as on screen. A higher density makes the same document
+    smaller on the panel, a lower one larger. The object's scale scales the panel.
+  </p>
+
+  <h3>Placing a terminal screen</h3>
+  <ol class="steps">
+    <li>Add a <b>UI Canvas</b> component to an object in front of the terminal and assign the UI Document.</li>
+    <li>Set <b>Space</b> to <b>World</b>.</li>
+    <li>Set <b>Size</b> to the screen's size in metres, and <b>Pixels / Metre</b> so the canvas has the pixel size
+      the document was designed for (a 1.6 m wide screen at 1200 px/m is 1920 px wide).</li>
+    <li>Rotate the object so its +X axis points out of the screen, toward the player.</li>
+    <li>Set <b>Reach</b> to how close the player must be to use it.</li>
+  </ol>
+
+  <h2>Depth</h2>
+  <p>
+    With <code>Depth</code> <b>Occluded by the world</b>, scene geometry in front of the panel hides it, as it would
+    hide a real screen. <b>Always on top</b> draws the panel over everything, for markers and labels that must stay
+    readable. Either way the panel is drawn with the scene's transparent geometry, after the opaque scene.
+  </p>
+
+  <h2>Input</h2>
+  <p>
+    The mouse pointer is a ray from the camera through the cursor. Where it hits the panel is the UI pixel it
+    points at, and hover, press, drag and scroll work as on a screen canvas.
+  </p>
+  <ul>
+    <li>The panel reacts only when the hit is within <code>Reach</code> metres of the camera. A farther panel still
+      draws but ignores the pointer.</li>
+    <li>Gamepad and keyboard navigation follow the player's gaze: they act on the panel only while the centre of the
+      view points at it within Reach. Looking away clears the focus.</li>
+  </ul>
+  <p>
+    <code>GameUi.ShowPointerRay 1</code> draws where the pointer ray hits each world panel, with the UI pixel, the
+    element under it and the distance. It is a debug overlay in the game view.
+  </p>
+
+  <h2>Property reference</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Property</th><th>Default</th><th>Description</th></tr>
+    <tr><td><code>Space</code></td><td>Screen</td><td>Screen, World or Billboard.</td></tr>
+    <tr class="grp"><td colspan="3">Screen</td></tr>
+    <tr><td><code>ScaleMode</code></td><td>Scale with Height</td><td>How the canvas scales to the view.</td></tr>
+    <tr><td><code>ReferenceHeight</code></td><td>1080 px</td><td>Canvas height the document is designed for.</td></tr>
+    <tr class="grp"><td colspan="3">World and Billboard</td></tr>
+    <tr><td><code>PixelsPerMetre</code></td><td>500 px/m</td><td>Layout pixels per metre of panel.</td></tr>
+    <tr><td><code>Size</code></td><td>1.0 &times; 0.6 m</td><td>Width and height of the panel.</td></tr>
+    <tr><td><code>Reach</code></td><td>4 m</td><td>Farthest distance from the camera at which the panel takes the
+      pointer and navigation.</td></tr>
+    <tr><td><code>Depth</code></td><td>Occluded by the world</td><td>Occluded by the world, or Always on top.</td></tr>
+  </table></div>
+  <p>The properties of the other space are hidden.</p>
+
+  <div class="note"><div class="nh">Note</div>
+    A world panel's Backdrop Blur does not draw: the blurred view behind UI exists for screen canvases only (see
+    <a href="TextAndBrushEffects.html#backdrop">Backdrop Blur</a>).
+  </div>
+
+  <div class="seealso">
+    See also: <a href="FitAndTextFit.html">Fit to Content and Text Fit</a> &middot;
+    <a href="TextAndBrushEffects.html">Text and Brush Effects</a>
+  </div>
+</div>
+</body>
+</html>

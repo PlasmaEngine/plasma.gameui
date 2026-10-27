@@ -2,7 +2,7 @@
 
 #include <EditorPluginGameUi/UiFontAsset/UiFontAsset.h>
 #include <EditorPluginGameUi/UiFontAsset/UiFontAssetManager.h>
-#include <EditorPluginGameUi/UiFontAsset/UiFontAssetWindow.moc.h>
+#include <EditorPluginGameUi/UiFontAsset/UiFontAssetWindow.h>
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plUiFontAssetDocumentManager, 1, plRTTIDefaultAllocator<plUiFontAssetDocumentManager>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -36,7 +36,7 @@ void plUiFontAssetDocumentManager::OnDocumentManagerEvent(const plDocumentManage
     {
       if (e.m_pDocument->GetDynamicRTTI() == plGetStaticRTTI<plUiFontAssetDocument>())
       {
-        new plQtUiFontAssetDocumentWindow(static_cast<plUiFontAssetDocument*>(e.m_pDocument)); // NOLINT: Not a memory leak
+        new plUiFontAssetDocumentWindow(static_cast<plUiFontAssetDocument*>(e.m_pDocument)); // NOLINT: Not a memory leak
       }
     }
     break;

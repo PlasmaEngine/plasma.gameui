@@ -27,9 +27,10 @@ public:
   virtual plStatus Generate(plStringView sInputFileAbs, plStringView sMode, plDynamicArray<plDocument*>& out_generatedDocuments) override;
 };
 
-/// \brief Opens the modal "Import UI from Figma" dialog: file URL + personal access token
-/// (stored per-user), frame picker, image-fill/vector download via the Figma REST API,
-/// then imports the selected frames as UI Document assets into the chosen folder.
+/// \brief Opens the modal "Import UI from Figma" dialog (drawn by the engine): file URL +
+/// personal access token (stored per-user), frame
+/// picker, image-fill/vector download via the Figma REST API, then imports the selected
+/// frames as UI Document assets into the chosen folder.
 void plUiOpenFigmaImportDialog();
 
 /// \brief Project-menu action that opens the Figma import dialog.

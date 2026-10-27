@@ -7,8 +7,9 @@ public class PlasmaGameUiWorkspace : WorkspaceRules
 {
     public PlasmaGameUiWorkspace(BuildContext context) : base(context)
     {
-        TargetNames.Add("GameUiPlugin");
+        // The GameUi runtime (plGameUiPlugin) ships with the engine; this package builds on it.
         TargetNames.Add("EnginePluginGameUi");
         TargetNames.Add("EditorPluginGameUi");
+        TargetNames.Add("GameUiTest");
     }
 }

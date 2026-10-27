@@ -17,10 +17,10 @@ public class EditorPluginGameUiModule : ModuleRules
         PrivateIncludePaths.Add(Path.Combine(freetype, "include"));
         PrivateLibraries.Add(Path.Combine(freetype, "win", "x64", "freetype.lib"));
         PlasmaPackageFreetype.StageRuntime(context);
-        PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/GameUiPlugin", "plGameUiPlugin");
-        PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/EnginePluginGameUi", "plEnginePluginGameUi");
+        PlasmaPackageSdk.AddImportLibrary(this, context, "plGameUiPlugin");
 
-        PlasmaPackageQt.ConfigureQtModule(this, context, "EditorPluginGameUiModule",
-            "Source/EditorPluginGameUi", "Core", "Gui", "Widgets", "Network");
+        // The animation panel's clip list, strips and track view are engine-drawn: EditorUi.
+        PlasmaPackageSdk.AddImportLibrary(this, context, "plEditorUi");
+        PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/EnginePluginGameUi", "plEnginePluginGameUi");
     }
 }

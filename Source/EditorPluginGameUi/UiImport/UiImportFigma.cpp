@@ -1,37 +1,23 @@
 #include <EditorPluginGameUi/EditorPluginGameUiPCH.h>
 
 #include <EditorPluginGameUi/UiImport/UiImportFigma.h>
+#include <EditorPluginGameUi/UiImport/UiImportFigmaEngineDlg.h>
+#include <EditorPluginGameUi/UiImport/UiImportFigmaSession.h>
 #include <EditorPluginGameUi/UiImport/UiImportWriter.h>
 
-#include <EditorFramework/EditorApp/EditorApp.moc.h>
+#include <EditorFramework/EditorApp/EditorApp.h>
+#include <EditorUi/Platform/EditorPlatform.h>
+#include <EditorUi/Runtime.h>
 #include <Foundation/IO/FileSystem/FileReader.h>
 #include <Foundation/IO/JSONReader.h>
 #include <Foundation/IO/MemoryStream.h>
 #include <Foundation/IO/OSFile.h>
 #include <GameUiPlugin/Elements/UiElements.h>
+#include <GuiFoundation/EngineUi/EngineDialog.h>
 #include <ToolsFoundation/Document/Document.h>
 #include <ToolsFoundation/Document/DocumentManager.h>
+#include <ToolsFoundation/Network/HttpClient.h>
 #include <ToolsFoundation/Project/ToolsProject.h>
-
-#include <QCheckBox>
-#include <QDialog>
-#include <QDialogButtonBox>
-#include <QEventLoop>
-#include <QFileDialog>
-#include <QGridLayout>
-#include <QHeaderView>
-#include <QLabel>
-#include <QLineEdit>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
-#include <QPushButton>
-#include <QSettings>
-#include <QTreeWidget>
-#include <QTreeWidgetItemIterator>
-#include <QVBoxLayout>
-
-#include <memory>
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plUiFigmaDocumentGenerator, 1, plRTTIDefaultAllocator<plUiFigmaDocumentGenerator>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -837,62 +823,76 @@ plStatus plUiFigmaDocumentGenerator::Generate(plStringView sInputFileAbs, plStri
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
-// REST import dialog
+// REST requests
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
 namespace
 {
-  QByteArray FetchUrl(QNetworkAccessManager& nam, const QString& sUrl, const QString& sToken, QString& out_sError)
+  /// A GET with the access token (empty for the pre-signed image URLs); out_sError says why nothing came back.
+  plDynamicArray<plUInt8> FetchUrl(plStringView sUrl, plStringView sToken, plStringBuilder& out_sError)
   {
-    QNetworkRequest request{QUrl(sUrl)};
-    if (!sToken.isEmpty())
-      request.setRawHeader("X-Figma-Token", sToken.toUtf8());
+    plHttpClient::Request request;
+    request.m_sUrl = sUrl;
+    request.m_Timeout = plTime::MakeFromSeconds(60);
 
-    QNetworkReply* pReply = nam.get(request);
+    if (!sToken.IsEmpty())
+    {
+      plStringBuilder sHeader("X-Figma-Token: ", sToken);
+      request.m_Headers.PushBack(sHeader);
+    }
 
-    QEventLoop loop;
-    QObject::connect(pReply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
+    plUInt32 uiStatus = 0;
+    plDynamicArray<plUInt8> data;
+    if (plHttpClient::Send(request, uiStatus, data, out_sError).Failed())
+    {
+      data.Clear();
+      return data;
+    }
 
-    QByteArray data;
-    if (pReply->error() != QNetworkReply::NoError)
-      out_sError = pReply->errorString();
-    else
-      data = pReply->readAll();
+    if (uiStatus >= 400)
+    {
+      out_sError.SetFormat("HTTP status {}", uiStatus);
+      data.Clear();
+    }
 
-    pReply->deleteLater();
     return data;
   }
 
-  QString ExtractFigmaFileKey(QString sUrl)
+  plString ExtractFigmaFileKey(plStringView sUrlOrKey)
   {
-    sUrl = sUrl.trimmed();
+    plStringBuilder sUrl(sUrlOrKey);
+    sUrl.Trim(" \t\r\n");
 
-    for (const QString& sMarker : {QStringLiteral("/file/"), QStringLiteral("/design/")})
+    for (const char* szMarker : {"/file/", "/design/"})
     {
-      const int iPos = sUrl.indexOf(sMarker);
-      if (iPos >= 0)
-      {
-        QString sKey = sUrl.mid(iPos + sMarker.length());
-        const int iSlash = sKey.indexOf('/');
-        if (iSlash >= 0)
-          sKey = sKey.left(iSlash);
-        const int iQuery = sKey.indexOf('?');
-        if (iQuery >= 0)
-          sKey = sKey.left(iQuery);
-        return sKey;
-      }
+      const char* szPos = sUrl.FindSubString(szMarker);
+      if (szPos == nullptr)
+        continue;
+
+      plStringView sKey(szPos + plStringUtils::GetStringElementCount(szMarker), sUrl.GetData() + sUrl.GetElementCount());
+      if (const char* szSlash = sKey.FindSubString("/"))
+        sKey = plStringView(sKey.GetStartPointer(), szSlash);
+      if (const char* szQuery = sKey.FindSubString("?"))
+        sKey = plStringView(sKey.GetStartPointer(), szQuery);
+      return sKey;
     }
 
     return sUrl; // assume a raw key
   }
 
-  plResult ParseJsonBytes(const QByteArray& bytes, plVariantDictionary& out_root)
+  plString TrimToken(plStringView sToken)
   {
-    if (bytes.isEmpty())
+    plStringBuilder sTrimmed(sToken);
+    sTrimmed.Trim(" \t\r\n");
+    return sTrimmed;
+  }
+
+  plResult ParseJsonBytes(plArrayPtr<const plUInt8> bytes, plVariantDictionary& out_root)
+  {
+    if (bytes.IsEmpty())
       return PL_FAILURE;
 
-    plRawMemoryStreamReader memoryReader(bytes.constData(), bytes.size());
+    plRawMemoryStreamReader memoryReader(bytes.GetPtr(), bytes.GetCount());
 
     plJSONReader reader;
     if (reader.Parse(memoryReader).Failed())
@@ -936,344 +936,262 @@ namespace
     }
   }
 
-  QString SanitizeFileName(QString s)
+  plString SanitizeFileName(plStringView sName)
   {
-    for (const QChar c : {QChar(':'), QChar(';'), QChar('/'), QChar('\\'), QChar('?'), QChar('*'), QChar('"'), QChar('<'), QChar('>'), QChar('|')})
-      s.replace(c, QChar('_'));
+    plStringBuilder s(sName);
+    for (const char* szChar : {":", ";", "/", "\\", "?", "*", "\"", "<", ">", "|"})
+      s.ReplaceAll(szChar, "_");
     return s;
   }
 
   /// Downloads a png to <folder>/FigmaImages/<name>.png; returns the absolute path or empty.
-  plString DownloadPng(QNetworkAccessManager& nam, const QString& sUrl, const QString& sTargetFolder, const QString& sFileBaseName)
+  plString DownloadPng(plStringView sUrl, plStringView sTargetFolder, plStringView sFileBaseName)
   {
-    QString sError;
-    const QByteArray bytes = FetchUrl(nam, sUrl, {}, sError); // image URLs are pre-signed, no token
-    if (bytes.isEmpty())
+    plStringBuilder sError;
+    const plDynamicArray<plUInt8> bytes = FetchUrl(sUrl, {}, sError); // image URLs are pre-signed, no token
+    if (bytes.IsEmpty())
       return {};
 
-    plStringBuilder sDir = sTargetFolder.toUtf8().constData();
+    plStringBuilder sDir = sTargetFolder;
     sDir.AppendPath("FigmaImages");
     if (plOSFile::CreateDirectoryStructure(sDir).Failed())
       return {};
 
     plStringBuilder sFile = sDir;
-    sFile.AppendPath(SanitizeFileName(sFileBaseName).toUtf8().constData());
+    sFile.AppendPath(SanitizeFileName(sFileBaseName));
     sFile.Append(".png");
 
     plOSFile file;
     if (file.Open(sFile, plFileOpenMode::Write).Failed())
       return {};
 
-    file.Write(bytes.constData(), bytes.size()).IgnoreResult();
+    file.Write(bytes.GetData(), bytes.GetCount()).IgnoreResult();
     file.Close();
 
     return plString(sFile.GetView());
   }
 } // namespace
 
-void plUiOpenFigmaImportDialog()
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// REST session
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+struct plUiFigmaRestSession::Data
 {
-  QDialog dlg(QApplication::activeWindow());
-  dlg.setWindowTitle("Import UI from Figma");
-  dlg.resize(640, 520);
+  plVariantDictionary m_FileRoot;
+  plDynamicArray<FigmaFrameEntry> m_Frames; ///< point into m_FileRoot
+};
 
-  QSettings settings;
+plUiFigmaRestSession::plUiFigmaRestSession()
+  : m_pData(PL_DEFAULT_NEW(Data))
+{
+}
 
-  QVBoxLayout* pLayout = new QVBoxLayout(&dlg);
+plUiFigmaRestSession::~plUiFigmaRestSession() = default;
 
-  QGridLayout* pForm = new QGridLayout();
-  pForm->addWidget(new QLabel("File URL or key:", &dlg), 0, 0);
-  QLineEdit* pUrlEdit = new QLineEdit(&dlg);
-  pUrlEdit->setPlaceholderText("https://www.figma.com/file/<key>/... or the raw file key");
-  pUrlEdit->setText(settings.value("FigmaImport/LastUrl").toString());
-  pForm->addWidget(pUrlEdit, 0, 1);
+bool plUiFigmaRestSession::Fetch(plStringView sUrlOrKey, plStringView sToken, const StatusCallback& onStatus)
+{
+  m_pData->m_FileRoot.Clear();
+  m_pData->m_Frames.Clear();
+  m_Frames.Clear();
 
-  pForm->addWidget(new QLabel("Access token:", &dlg), 1, 0);
-  QLineEdit* pTokenEdit = new QLineEdit(&dlg);
-  pTokenEdit->setEchoMode(QLineEdit::Password);
-  pTokenEdit->setPlaceholderText("figd_... (Figma > Settings > Personal access tokens)");
-  pTokenEdit->setText(settings.value("FigmaImport/Token").toString());
-  pForm->addWidget(pTokenEdit, 1, 1);
+  const plString sKey = ExtractFigmaFileKey(sUrlOrKey);
+  const plString sTrimmedToken = TrimToken(sToken);
 
-  pForm->addWidget(new QLabel("Output folder:", &dlg), 2, 0);
-  QHBoxLayout* pFolderRow = new QHBoxLayout();
-  QLineEdit* pFolderEdit = new QLineEdit(&dlg);
+  if (sKey.IsEmpty() || sTrimmedToken.IsEmpty())
   {
-    QString sDefault = settings.value("FigmaImport/LastFolder").toString();
-    if (sDefault.isEmpty() && plToolsProject::GetSingleton() != nullptr && plToolsProject::GetSingleton()->IsProjectOpen())
-      sDefault = QString::fromUtf8(plToolsProject::GetSingleton()->GetProjectDirectory().GetData());
-    pFolderEdit->setText(sDefault);
+    onStatus("Enter both a file URL/key and an access token.");
+    return false;
   }
-  QPushButton* pBrowse = new QPushButton("...", &dlg);
-  pFolderRow->addWidget(pFolderEdit, 1);
-  pFolderRow->addWidget(pBrowse);
-  pForm->addLayout(pFolderRow, 2, 1);
 
-  pLayout->addLayout(pForm);
+  onStatus("Fetching file...");
+  plEditorPlatform::SetOverrideCursor(plEditorPlatformCursor::Wait);
 
-  QPushButton* pFetch = new QPushButton("Fetch Frames", &dlg);
-  pLayout->addWidget(pFetch);
+  plStringBuilder sError;
+  // geometry=paths includes vector fill geometry, so shapes import as real vectors
+  plStringBuilder sUrl;
+  sUrl.SetFormat("https://api.figma.com/v1/files/{}?geometry=paths", sKey);
+  const plDynamicArray<plUInt8> bytes = FetchUrl(sUrl, sTrimmedToken, sError);
 
-  QTreeWidget* pFrameTree = new QTreeWidget(&dlg);
-  pFrameTree->setColumnCount(1);
-  pFrameTree->setHeaderLabels({"Frames (check what to import)"});
-  pLayout->addWidget(pFrameTree, 1);
+  plEditorPlatform::RestoreOverrideCursor();
 
-  QLabel* pStatus = new QLabel(&dlg);
-  pStatus->setWordWrap(true);
-  pLayout->addWidget(pStatus);
+  if (!sError.IsEmpty())
+  {
+    plStringBuilder sStatus;
+    sStatus.SetFormat("Request failed: {}", sError);
+    onStatus(sStatus);
+    return false;
+  }
 
-  QDialogButtonBox* pButtons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dlg);
-  QPushButton* pImport = pButtons->addButton("Import Selected", QDialogButtonBox::AcceptRole);
-  pImport->setEnabled(false);
-  pLayout->addWidget(pButtons);
+  if (ParseJsonBytes(bytes, m_pData->m_FileRoot).Failed())
+  {
+    onStatus("The response could not be parsed (invalid token or file key?).");
+    return false;
+  }
 
-  QNetworkAccessManager nam;
+  CollectTopLevelFrames(m_pData->m_FileRoot, m_pData->m_Frames);
 
-  // parsed file data shared between Fetch and Import
-  auto pFileRoot = std::make_shared<plVariantDictionary>();
-  auto pFrames = std::make_shared<plDynamicArray<FigmaFrameEntry>>();
+  if (m_pData->m_Frames.IsEmpty())
+  {
+    onStatus("The file contains no top-level frames.");
+    return false;
+  }
 
-  QObject::connect(pBrowse, &QPushButton::clicked, [&]()
+  for (const FigmaFrameEntry& entry : m_pData->m_Frames)
+  {
+    Frame& frame = m_Frames.ExpandAndGetRef();
+    frame.m_sPage = entry.m_sPageName;
+    frame.m_sName = JsonString(*entry.m_pFrame, "name", "Frame");
+  }
+
+  plStringBuilder sStatus;
+  sStatus.SetFormat("{} frame(s) found. Uncheck what you don't need, then Import.", m_Frames.GetCount());
+  onStatus(sStatus);
+  return true;
+}
+
+void plUiFigmaRestSession::Import(plStringView sUrlOrKey, plStringView sToken, plStringView sFolder, plArrayPtr<const plInt32> frames, const StatusCallback& onStatus)
+{
+  const plString sKey = ExtractFigmaFileKey(sUrlOrKey);
+  const plString sTrimmedToken = TrimToken(sToken);
+
+  plEditorPlatform::SetOverrideCursor(plEditorPlatformCursor::Wait);
+
+  plUiImportReport report;
+  plUiImportWriter writer(report);
+
+  FigmaContext ctx;
+  ctx.m_pReport = &report;
+  ctx.m_bOffline = false;
+
+  // collect image refs + vector nodes of the checked frames
+  plSet<plString> imageRefs, vectorIds;
+  for (plInt32 iFrame : frames)
+    CollectImageRefsAndVectors(*m_pData->m_Frames[iFrame].m_pFrame, imageRefs, vectorIds);
+
+  plStringBuilder sError;
+  plStringBuilder sRequest;
+
+  // image fills: GET /v1/files/:key/images -> { meta: { images: { ref: url } } }
+  if (!imageRefs.IsEmpty())
+  {
+    onStatus("Downloading image fills...");
+    plEditorUiRuntime::KeepResponsive();
+
+    sRequest.SetFormat("https://api.figma.com/v1/files/{}/images", sKey);
+    const plDynamicArray<plUInt8> bytes = FetchUrl(sRequest, sTrimmedToken, sError);
+
+    plVariantDictionary imagesRoot;
+    if (ParseJsonBytes(bytes, imagesRoot).Succeeded())
     {
-      const QString sDir = QFileDialog::getExistingDirectory(&dlg, "Choose Output Folder", pFolderEdit->text());
-      if (!sDir.isEmpty())
-        pFolderEdit->setText(sDir);
-    });
-
-  QObject::connect(pFetch, &QPushButton::clicked, [&]()
-    {
-      pFrameTree->clear();
-      pImport->setEnabled(false);
-      pFileRoot->Clear();
-      pFrames->Clear();
-
-      const QString sKey = ExtractFigmaFileKey(pUrlEdit->text());
-      const QString sToken = pTokenEdit->text().trimmed();
-
-      if (sKey.isEmpty() || sToken.isEmpty())
+      if (const plVariantDictionary* pMeta = JsonDict(imagesRoot, "meta"))
       {
-        pStatus->setText("Enter both a file URL/key and an access token.");
-        return;
-      }
-
-      pStatus->setText("Fetching file...");
-      QApplication::setOverrideCursor(Qt::WaitCursor);
-
-      QString sError;
-      // geometry=paths includes vector fill geometry, so shapes import as real vectors
-      const QByteArray bytes = FetchUrl(nam, QString("https://api.figma.com/v1/files/%1?geometry=paths").arg(sKey), sToken, sError);
-
-      QApplication::restoreOverrideCursor();
-
-      if (!sError.isEmpty())
-      {
-        pStatus->setText(QString("Request failed: %1").arg(sError));
-        return;
-      }
-
-      if (ParseJsonBytes(bytes, *pFileRoot).Failed())
-      {
-        pStatus->setText("The response could not be parsed (invalid token or file key?).");
-        return;
-      }
-
-      CollectTopLevelFrames(*pFileRoot, *pFrames);
-
-      if (pFrames->IsEmpty())
-      {
-        pStatus->setText("The file contains no top-level frames.");
-        return;
-      }
-
-      QMap<QString, QTreeWidgetItem*> pageItems;
-      plInt32 iFrameIndex = 0;
-
-      for (const auto& frameEntry : *pFrames)
-      {
-        const QString sPage = QString::fromUtf8(frameEntry.m_sPageName.GetData());
-        QTreeWidgetItem*& pPageItem = pageItems[sPage];
-        if (pPageItem == nullptr)
+        if (const plVariantDictionary* pImages = JsonDict(*pMeta, "images"))
         {
-          pPageItem = new QTreeWidgetItem(pFrameTree);
-          pPageItem->setText(0, sPage);
-          pPageItem->setExpanded(true);
-          pPageItem->setFlags(Qt::ItemIsEnabled);
-        }
-
-        QTreeWidgetItem* pFrameItem = new QTreeWidgetItem(pPageItem);
-        pFrameItem->setText(0, QString::fromUtf8(plStringBuilder(JsonString(*frameEntry.m_pFrame, "name", "Frame")).GetData()));
-        pFrameItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
-        pFrameItem->setCheckState(0, Qt::Checked);
-        pFrameItem->setData(0, Qt::UserRole, iFrameIndex);
-        ++iFrameIndex;
-      }
-
-      pStatus->setText(QString("%1 frame(s) found. Uncheck what you don't need, then Import.").arg(iFrameIndex));
-      pImport->setEnabled(true);
-
-      settings.setValue("FigmaImport/LastUrl", pUrlEdit->text());
-      settings.setValue("FigmaImport/Token", pTokenEdit->text());
-    });
-
-  QObject::connect(pButtons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-
-  QObject::connect(pImport, &QPushButton::clicked, [&]()
-    {
-      const QString sFolder = pFolderEdit->text().trimmed();
-      if (sFolder.isEmpty())
-      {
-        pStatus->setText("Choose an output folder inside the project first.");
-        return;
-      }
-
-      settings.setValue("FigmaImport/LastFolder", sFolder);
-
-      // gather checked frame indices
-      plDynamicArray<plInt32> checkedFrames;
-      for (QTreeWidgetItemIterator it(pFrameTree); *it != nullptr; ++it)
-      {
-        QTreeWidgetItem* pItem = *it;
-        if (pItem->flags().testFlag(Qt::ItemIsUserCheckable) && pItem->checkState(0) == Qt::Checked)
-          checkedFrames.PushBack(pItem->data(0, Qt::UserRole).toInt());
-      }
-
-      if (checkedFrames.IsEmpty())
-      {
-        pStatus->setText("No frames checked.");
-        return;
-      }
-
-      const QString sKey = ExtractFigmaFileKey(pUrlEdit->text());
-      const QString sToken = pTokenEdit->text().trimmed();
-
-      QApplication::setOverrideCursor(Qt::WaitCursor);
-
-      plUiImportReport report;
-      plUiImportWriter writer(report);
-
-      FigmaContext ctx;
-      ctx.m_pReport = &report;
-      ctx.m_bOffline = false;
-
-      // collect image refs + vector nodes of the checked frames
-      plSet<plString> imageRefs, vectorIds;
-      for (plInt32 iFrame : checkedFrames)
-        CollectImageRefsAndVectors(*(*pFrames)[iFrame].m_pFrame, imageRefs, vectorIds);
-
-      QString sError;
-
-      // image fills: GET /v1/files/:key/images -> { meta: { images: { ref: url } } }
-      if (!imageRefs.IsEmpty())
-      {
-        pStatus->setText("Downloading image fills...");
-        QApplication::processEvents();
-
-        const QByteArray bytes = FetchUrl(nam, QString("https://api.figma.com/v1/files/%1/images").arg(sKey), sToken, sError);
-
-        plVariantDictionary imagesRoot;
-        if (ParseJsonBytes(bytes, imagesRoot).Succeeded())
-        {
-          if (const plVariantDictionary* pMeta = JsonDict(imagesRoot, "meta"))
+          for (const plString& sRef : imageRefs)
           {
-            if (const plVariantDictionary* pImages = JsonDict(*pMeta, "images"))
-            {
-              for (const plString& sRef : imageRefs)
-              {
-                const plStringView sUrl = JsonString(*pImages, sRef);
-                if (sUrl.IsEmpty())
-                  continue;
+            const plStringView sUrl = JsonString(*pImages, sRef);
+            if (sUrl.IsEmpty())
+              continue;
 
-                const plString sFile = DownloadPng(nam, QString::fromUtf8(plStringBuilder(sUrl).GetData()), sFolder, QString::fromUtf8(sRef.GetData()));
-                ctx.m_ImageFiles[sRef] = sFile;
-              }
-            }
+            const plString sFile = DownloadPng(sUrl, sFolder, sRef);
+            ctx.m_ImageFiles[sRef] = sFile;
           }
         }
       }
+    }
+  }
 
-      // vector nodes: GET /v1/images/:key?ids=...&format=png&scale=2 -> { images: { id: url } }
-      if (!vectorIds.IsEmpty())
+  // vector nodes: GET /v1/images/:key?ids=...&format=png&scale=2 -> { images: { id: url } }
+  if (!vectorIds.IsEmpty())
+  {
+    onStatus("Rendering vector shapes...");
+    plEditorUiRuntime::KeepResponsive();
+
+    plStringBuilder sIds;
+    for (const plString& sId : vectorIds)
+      sIds.AppendWithSeparator(",", sId);
+
+    sRequest.SetFormat("https://api.figma.com/v1/images/{}?ids={}&format=png&scale=2", sKey, sIds);
+    const plDynamicArray<plUInt8> bytes = FetchUrl(sRequest, sTrimmedToken, sError);
+
+    plVariantDictionary rendersRoot;
+    if (ParseJsonBytes(bytes, rendersRoot).Succeeded())
+    {
+      if (const plVariantDictionary* pImages = JsonDict(rendersRoot, "images"))
       {
-        pStatus->setText("Rendering vector shapes...");
-        QApplication::processEvents();
-
-        QString sIds;
         for (const plString& sId : vectorIds)
         {
-          if (!sIds.isEmpty())
-            sIds += ",";
-          sIds += QString::fromUtf8(sId.GetData());
-        }
+          const plStringView sUrl = JsonString(*pImages, sId);
+          if (sUrl.IsEmpty())
+            continue;
 
-        const QByteArray bytes = FetchUrl(nam, QString("https://api.figma.com/v1/images/%1?ids=%2&format=png&scale=2").arg(sKey, sIds), sToken, sError);
-
-        plVariantDictionary rendersRoot;
-        if (ParseJsonBytes(bytes, rendersRoot).Succeeded())
-        {
-          if (const plVariantDictionary* pImages = JsonDict(rendersRoot, "images"))
-          {
-            for (const plString& sId : vectorIds)
-            {
-              const plStringView sUrl = JsonString(*pImages, sId);
-              if (sUrl.IsEmpty())
-                continue;
-
-              QString sBase = QString("vec_%1").arg(QString::fromUtf8(sId.GetData()));
-              const plString sFile = DownloadPng(nam, QString::fromUtf8(plStringBuilder(sUrl).GetData()), sFolder, sBase);
-              ctx.m_VectorFiles[sId] = sFile;
-            }
-          }
+          const plStringBuilder sBase("vec_", sId);
+          const plString sFile = DownloadPng(sUrl, sFolder, sBase);
+          ctx.m_VectorFiles[sId] = sFile;
         }
       }
+    }
+  }
 
-      // import the frames
-      pStatus->setText("Importing frames...");
-      QApplication::processEvents();
+  // import the frames
+  onStatus("Importing frames...");
+  plEditorUiRuntime::KeepResponsive();
 
-      plStringBuilder sFolderPl = sFolder.toUtf8().constData();
+  plStringBuilder sFolderPl = sFolder;
 
-      plDynamicArray<plDocument*> generatedDocs;
-      plString sFirstDocPath;
+  plDynamicArray<plDocument*> generatedDocs;
+  plString sFirstDocPath;
 
-      for (plInt32 iFrame : checkedFrames)
-      {
-        plUiImportDocument importDoc;
-        BuildFigmaFrameDocument(*(*pFrames)[iFrame].m_pFrame, ctx, sFolderPl, importDoc);
+  for (plInt32 iFrame : frames)
+  {
+    plUiImportDocument importDoc;
+    BuildFigmaFrameDocument(*m_pData->m_Frames[iFrame].m_pFrame, ctx, sFolderPl, importDoc);
 
-        const plStatus status = writer.WriteDocument(importDoc, generatedDocs);
-        if (status.Failed())
-          report.Warning(importDoc.m_Root.m_sName, status.m_sMessage);
-        else if (sFirstDocPath.IsEmpty())
-          sFirstDocPath = importDoc.m_sTargetPathAbs;
-      }
+    const plStatus status = writer.WriteDocument(importDoc, generatedDocs);
+    if (status.Failed())
+      report.Warning(importDoc.m_Root.m_sName, status.m_sMessage);
+    else if (sFirstDocPath.IsEmpty())
+      sFirstDocPath = importDoc.m_sTargetPathAbs;
+  }
 
-      // save + close like the asset-import framework does
-      for (plDocument* pDoc : generatedDocs)
-      {
-        pDoc->SaveDocument(true).LogFailure();
-        pDoc->GetDocumentManager()->CloseDocument(pDoc);
-      }
+  // save + close like the asset-import framework does
+  for (plDocument* pDoc : generatedDocs)
+  {
+    pDoc->SaveDocument(true).LogFailure();
+    pDoc->GetDocumentManager()->CloseDocument(pDoc);
+  }
 
-      QApplication::restoreOverrideCursor();
+  plEditorPlatform::RestoreOverrideCursor();
 
-      plStringBuilder sTitle;
-      sTitle.SetFormat("Figma Import — {} frame(s)", checkedFrames.GetCount());
-      plUiImportShowReport(report, sTitle);
+  plStringBuilder sTitle;
+  sTitle.SetFormat("Figma Import — {} frame(s)", frames.GetCount());
+  plUiImportShowReport(report, sTitle);
 
-      if (!sFirstDocPath.IsEmpty())
-        plQtEditorApp::GetSingleton()->OpenDocumentQueued(sFirstDocPath);
+  if (!sFirstDocPath.IsEmpty())
+    plEditorApp::GetSingleton()->OpenDocumentQueued(sFirstDocPath);
+}
 
-      dlg.accept();
-    });
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// REST import dialog
+// ═══════════════════════════════════════════════════════════════════════════════════════
 
-  dlg.exec();
+void plUiOpenFigmaImportDialog()
+{
+  if (!plEngineDialog::IsEngineEnabled())
+  {
+    plLog::Error("The Figma import dialog needs the editor UI renderer.");
+    return;
+  }
+
+  plUiFigmaImportEngineDlg dlg;
+  dlg.Exec();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
 plUiFigmaImportAction::plUiFigmaImportAction(const plActionContext& context, const char* szName, plInt32 iUnused)
-  : plButtonAction(context, szName, false, "")
+  : plButtonAction(context, szName, false, ":/GameUiIcons/Icons/Import.svg")
 {
   PL_IGNORE_UNUSED(iUnused);
 }

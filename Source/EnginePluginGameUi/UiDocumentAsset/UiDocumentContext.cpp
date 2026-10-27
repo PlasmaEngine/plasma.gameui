@@ -70,6 +70,13 @@ void plUiDocumentContext::UpdateDocumentContext()
 {
   plEngineProcessDocumentContext::UpdateDocumentContext();
 
+  // the gizmos every frame, so a frame that renders a view always has them
+  for (plEngineProcessViewContext* pView : m_ViewContexts)
+  {
+    if (pView != nullptr)
+      static_cast<plUiDocumentViewContext*>(pView)->DrawSelectionGizmos();
+  }
+
   // draw-list stats for the editor status bar, pushed only on change (the UiMockChanged channel)
   plUInt32 uiBatches = 0, uiQuads = 0;
 
@@ -85,6 +92,8 @@ void plUiDocumentContext::UpdateDocumentContext()
 
     uiBatches = pComponent->GetLastExtractedBatchCount();
     uiQuads = pComponent->GetLastExtractedQuadCount();
+
+    UpdateTextFit(*pComponent);
   }
 
   if (uiBatches == m_uiLastSentBatches && uiQuads == m_uiLastSentQuads)
@@ -101,6 +110,66 @@ void plUiDocumentContext::UpdateDocumentContext()
   sPayload.SetFormat("{};{}", uiBatches, uiQuads);
   msg.m_sPayload = sPayload.GetData();
 
+  SendProcessMessage(&msg);
+}
+
+plVec2 plUiDocumentContext::GetPreviewViewportSize() const
+{
+  for (const plEngineProcessViewContext* pView : m_ViewContexts)
+  {
+    if (pView != nullptr)
+      return static_cast<const plUiDocumentViewContext*>(pView)->GetWindowSize();
+  }
+
+  return plVec2::MakeZero();
+}
+
+void plUiDocumentContext::UpdateTextFit(const plUiCanvasComponent& component)
+{
+  const plVec2 vViewport = GetPreviewViewportSize();
+  if (vViewport.x <= 0.0f || vViewport.y <= 0.0f)
+    return;
+
+  component.CollectTextFit(vViewport, m_TextFitIssues);
+
+  // one record per issue: kind, element path, needed, available, shrunk size, font, text, missing characters
+  constexpr char szField[] = "\x1F";
+  constexpr char szRecord[] = "\x1E";
+
+  plStringBuilder sPayload;
+  for (const plUiTextFitIssue& issue : m_TextFitIssues)
+  {
+    if (!sPayload.IsEmpty())
+      sPayload.Append(szRecord);
+
+    sPayload.AppendFormat("{}", static_cast<plUInt32>(issue.m_Kind));
+    sPayload.Append(szField);
+
+    for (plUInt32 i = 0; i < issue.m_Path.GetCount(); ++i)
+      sPayload.AppendFormat(i == 0 ? "{}" : "/{}", issue.m_Path[i]);
+
+    sPayload.AppendFormat("{}{}{}{}{}{}{}", szField, plArgF(issue.m_fNeeded, 1), szField, plArgF(issue.m_fAvailable, 1), szField, plArgF(issue.m_fShrunkSize, 1), szField);
+
+    if (issue.m_hFont.IsValid())
+      sPayload.Append(issue.m_hFont.GetResourceID());
+
+    plStringBuilder sText = issue.m_sText;
+    sText.ReplaceAll("\n", " ");
+    sPayload.Append(szField, sText, szField);
+
+    for (plUInt32 uiCp : issue.m_MissingGlyphs)
+      sPayload.Append(uiCp);
+  }
+
+  if (sPayload == m_sLastSentTextFit)
+    return;
+
+  m_sLastSentTextFit = sPayload;
+
+  plSimpleDocumentConfigMsgToEditor msg;
+  msg.m_DocumentGuid = GetDocumentGuid();
+  msg.m_sWhatToDo = "UiTextFit";
+  msg.m_sPayload = sPayload.GetData();
   SendProcessMessage(&msg);
 }
 
@@ -263,6 +332,18 @@ void plUiDocumentContext::HandleMessage(const plEditorEngineDocumentMsg* pMsg)
     if (pCfgMsg->m_sWhatToDo == "UiHighlightUntranslated")
     {
       plTranslator::HighlightUntranslated(pCfgMsg->m_iValue != 0);
+      return;
+    }
+
+    if (pCfgMsg->m_sWhatToDo == "UiPseudo")
+    {
+      // m_iValue = the pseudo-localization expansion in percent; 0 = off
+      PL_LOCK(m_pWorld->GetWriteMarker());
+
+      plUiCanvasComponent* pComponent = nullptr;
+      if (m_pWorld->TryGetComponent(m_hCanvasComponent, pComponent))
+        pComponent->SetPseudoLocalization(static_cast<float>(pCfgMsg->m_iValue) / 100.0f);
+
       return;
     }
 

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fonts and Characters — PlasmaEngine2 Manual</title>
+<link rel="stylesheet" href="manual.css" />
+</head>
+<body>
+<div class="wrap">
+  <p class="crumbs"><a href="index.html">Manual</a> / <a href="index.html">Game UI</a> / Fonts and Characters</p>
+  <h1>Fonts and Characters</h1>
+
+  <p>
+    A <b>UI Font</b> asset bakes the characters a game needs from a font file into a distance-field atlas. Only the
+    baked characters can draw. A character the atlas does not have draws as a box, and the Text Fit panel lists it.
+    This page covers choosing what is baked, and drawing languages that one font file does not cover.
+  </p>
+
+  <h2>Which characters are baked</h2>
+  <p>The atlas holds the union of:</p>
+  <ul>
+    <li>the ranges that are switched on: <code>Latin</code> (on by default), <code>LatinExtended</code>,
+      <code>Greek</code>, <code>Cyrillic</code>;</li>
+    <li>with <code>StringTableCharacters</code> (on by default), every character the project's string tables use,
+      in every language. The tables are the <code>.txt</code> files of the folders in
+      <code>&lt;project&gt;/Localization</code>; their keys are not counted;</li>
+    <li>the <code>CustomCharacters</code> text.</li>
+  </ul>
+  <p>
+    With StringTableCharacters on, editing a string table re-bakes the font, so a new translation's characters are
+    in the atlas without listing them. Turn it off for a font that only draws fixed texts, such as a number font,
+    to keep its atlas small.
+  </p>
+
+  <h2>Fallback fonts</h2>
+  <p>
+    A font file rarely covers every script. <code>FallbackFonts</code> lists further font files that are tried, in
+    order, for each character the font file has no glyph for: a Latin display face first, a Japanese face behind
+    it. Every character is baked from the first file that has it, at the same base size, into the same atlas. The
+    line height and baseline come from the font file. Kerning applies between two characters from the same file.
+  </p>
+  <ol class="steps">
+    <li>Open the UI Font asset.</li>
+    <li>Add the fallback font files to <b>Fallback Fonts</b> (<code>.ttf</code>, <code>.otf</code> or
+      <code>.ttc</code>; a collection bakes its first face).</li>
+    <li>Transform the font. Characters that none of the files have are counted in a warning, and still draw as
+      boxes.</li>
+  </ol>
+  <div class="note warn"><div class="nh">Atlas size</div>
+    A CJK language can add thousands of characters. The atlas grows up to 8192 &times; 8192; a font whose
+    characters do not fit fails to transform. Lower the base size, or split rarely used texts into another font.
+  </div>
+
+  <h2>Fixing missing characters</h2>
+  <p>
+    In the UI Document editor, the Text Fit panel shows "N characters missing from Font" while the previewed
+    language uses characters the font has not baked. <b>Add characters</b> on that row adds them, and every
+    character of the previewed language's string tables, to the font's Custom Characters, then saves and
+    re-bakes the font. If the font file and its fallbacks do not have a glyph for a character, adding it does not
+    help: add a fallback font that does.
+  </p>
+
+  <h2>Property reference</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Property</th><th>Default</th><th>Description</th></tr>
+    <tr><td><code>FontFile</code></td><td>empty</td><td>The font file to bake.</td></tr>
+    <tr><td><code>BaseSize</code></td><td>48 px</td><td>Pixel size the glyphs are baked at (16&ndash;256).</td></tr>
+    <tr><td><code>FallbackFonts</code></td><td>empty</td><td>Font files tried in order for characters the font file
+      does not have.</td></tr>
+    <tr><td><code>Latin</code></td><td>on</td><td>U+0020&ndash;U+007E.</td></tr>
+    <tr><td><code>LatinExtended</code></td><td>off</td><td>U+00A0&ndash;U+017F.</td></tr>
+    <tr><td><code>Cyrillic</code></td><td>off</td><td>U+0400&ndash;U+04FF.</td></tr>
+    <tr><td><code>Greek</code></td><td>off</td><td>U+0370&ndash;U+03FF.</td></tr>
+    <tr><td><code>StringTableCharacters</code></td><td>on</td><td>Bakes every character of the project's string
+      tables.</td></tr>
+    <tr><td><code>CustomCharacters</code></td><td>empty</td><td>Further characters to bake.</td></tr>
+  </table></div>
+
+  <div class="seealso">
+    See also: <a href="FitAndTextFit.html">Fit to Content and Text Fit</a> &middot;
+    <a href="TextAndBrushEffects.html">Text and Brush Effects</a>
+  </div>
+</div>
+</body>
+</html>

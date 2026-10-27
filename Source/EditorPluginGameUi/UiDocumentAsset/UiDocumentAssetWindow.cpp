@@ -1,797 +1,118 @@
 #include <EditorPluginGameUi/EditorPluginGameUiPCH.h>
 
 #include <EditorFramework/Assets/AssetCurator.h>
-#include <EditorFramework/Assets/AssetStatusIndicator.moc.h>
-#include <EditorFramework/DocumentWindow/EngineViewWidget.moc.h>
-#include <EditorFramework/EditorApp/EditorApp.moc.h>
+#include <EditorFramework/DocumentWindow/EngineViewWidget.h>
+#include <EditorFramework/EditorApp/EditorApp.h>
 #include <EditorFramework/InputContexts/EditorInputContext.h>
 #include <GameUiPlugin/Resources/UiStyleResource.h>
-#include <EditorPluginGameUi/UiDocumentAsset/UiDocumentAssetWindow.moc.h>
-#include <EditorPluginGameUi/UiDocumentAsset/UiEditorTheme.h>
+#include <EditorPluginGameUi/UiDocumentAsset/UiAddBindingDialog.h>
+#include <EditorPluginGameUi/UiDocumentAsset/UiAnimationEngineDlgs.h>
+#include <EditorPluginGameUi/UiDocumentAsset/UiBindingsView.h>
+#include <EditorPluginGameUi/UiDocumentAsset/UiDocumentAssetWindow.h>
+#include <EditorPluginGameUi/UiDocumentAsset/UiEngineWidgets.h>
+#include <EditorPluginGameUi/UiDocumentAsset/UiHierarchyView.h>
+#include <EditorPluginGameUi/UiDocumentAsset/UiPaletteView.h>
+#include <EditorPluginGameUi/UiDocumentAsset/UiStatesView.h>
+#include <EditorUi/Widgets.h>
 #include <Foundation/IO/FileSystem/FileReader.h>
+#include <Foundation/IO/OSFile.h>
 #include <Foundation/Strings/TranslationLookup.h>
 #include <GameEngine/Utils/BlackboardTemplateResource.h>
 #include <GameUiPlugin/Components/UiCanvasComponent.h>
 #include <GameUiPlugin/Elements/UiLayout.h>
 #include <Foundation/Utilities/AssetFileHeader.h>
-#include <GuiFoundation/ActionViews/MenuBarActionMapView.moc.h>
-#include <GuiFoundation/ActionViews/ToolBarActionMapView.moc.h>
-#include <GuiFoundation/ContainerWindow/ContainerWindow.moc.h>
-#include <GuiFoundation/DockPanels/DocumentPanel.moc.h>
-#include <GuiFoundation/PropertyGrid/PropertyGridWidget.moc.h>
+#include <GuiFoundation/EngineUi/EngineUiRenderer.h>
 #include <ToolsFoundation/Project/ToolsProject.h>
 #include <ToolsFoundation/Selection/SelectionManager.h>
-
-#include <ads/DockAreaWidget.h>
-
-#include <QActionGroup>
-#include <QComboBox>
-#include <QDialog>
-#include <QDialogButtonBox>
-#include <QDir>
-#include <QDoubleSpinBox>
-#include <QGridLayout>
-#include <QLineEdit>
-#include <QHeaderView>
-#include <QLabel>
-#include <QLayout>
-#include <QMenu>
-#include <QApplication>
-#include <QDrag>
-#include <QDragEnterEvent>
-#include <QMimeData>
-#include <QMouseEvent>
-#include <QPainter>
-#include <QPainterPath>
-#include <QScrollArea>
-#include <QStatusBar>
-#include <QTableWidget>
-#include <QToolBar>
-#include <QToolButton>
-#include <QTreeWidget>
 
 namespace
 {
   // must match the preview component's default canvas scaling (ScaleWithHeight, 1080)
   constexpr float s_fReferenceHeight = 1080.0f;
-  constexpr const char* szUiWidgetMimeType = "application/x-plasmaui-widget";
+
+  /// The canvas view. The engine shell hands drags over the view to HandleDrag: a widget type dragged from the palette
+  /// is created where it is dropped.
+  class plUiCanvasViewWidget : public plEngineViewWidget
+  {
+  public:
+    using plEngineViewWidget::plEngineViewWidget;
+
+    std::function<void(const plRTTI*, const plVec2I32&)> m_OnPaletteDrop;
+
+    bool HandleDrag(plEditorUiDropEvent::Type type, const plVec2& vPosition, const plEditorUiDragPayload* pPayload, bool bShift, bool bCtrl) override
+    {
+      if (pPayload == nullptr || !pPayload->HasFormat(plUiPaletteView::s_szMimeType))
+        return plEngineViewWidget::HandleDrag(type, vPosition, pPayload, bShift, bCtrl);
+
+      if (type == plEditorUiDropEvent::Type::Drop && m_OnPaletteDrop)
+      {
+        if (const plRTTI* pType = plRTTI::FindTypeByName(pPayload->GetText(plUiPaletteView::s_szMimeType)))
+          m_OnPaletteDrop(pType, plVec2I32(plMath::RoundToInt(vPosition.x), plMath::RoundToInt(vPosition.y)));
+      }
+
+      return type != plEditorUiDropEvent::Type::Leave;
+    }
+  };
+
   constexpr float s_fResizeHandleZonePx = 8.0f;
 
-  QColor GetElementTypeColor(const plRTTI* pType)
+  /// The canvas toolbar's device presets; the first (0 x 0) fills the viewport.
+  struct DevicePreset
   {
-    // widget-kind colors from plColorScheme::LightUI (see Documentation/GameUI)
-    if (pType->IsDerivedFrom<plUiText>())
-      return QColor(0xFC, 0xC4, 0x19); // Yellow: text
-    if (pType->IsDerivedFrom<plUiButton>() || pType->IsDerivedFrom<plUiProgressBar>() || pType->IsDerivedFrom<plUiTextInput>())
-      return QColor(0xFF, 0x92, 0x2B); // Orange: controls
-    if (pType->IsDerivedFrom<plUiImage>())
-      return QColor(0x94, 0xD8, 0x2D); // Lime: visual
-    if (pType->IsDerivedFrom<plUiSubDocument>())
-      return QColor(0xB9, 0x96, 0xCD); // Lavender: assets
-    if (pType->IsDerivedFrom<plUiPanel>())
-      return QColor(0x33, 0x9A, 0xF0); // Blue: containers
+    const char* m_szLabel;
+    plUInt32 m_uiWidth;
+    plUInt32 m_uiHeight;
+  };
 
-    return QColor(0xAD, 0xB5, 0xBD);
-  }
+  const DevicePreset s_DevicePresets[] = {
+    {"GameUi.Toolbar.FillViewport", 0, 0},
+    {"1920 x 1080", 1920, 1080},
+    {"2560 x 1440", 2560, 1440},
+    {"3840 x 2160", 3840, 2160},
+    {"1280 x 800 (Deck)", 1280, 800},
+    {"1080 x 2340 (Phone)", 1080, 2340},
+  };
 
-  /// eye/lock glyphs matching the scenegraph panel's iconography (ScenegraphDelegate.cpp)
-  QIcon MakeEyeIcon(bool bVisible)
-  {
-    QPixmap pixmap(16, 16);
-    pixmap.fill(Qt::transparent);
+  /// The canvas toolbar's zoom presets; 0 fits the device into the view.
+  const float s_ZoomPresets[] = {0.0f, 0.5f, 1.0f, 2.0f};
 
-    QPainter p(&pixmap);
-    p.setOpacity(bVisible ? 0.45 : 0.90);
-    p.setRenderHint(QPainter::Antialiasing);
-
-    const QColor penColor = bVisible ? QColor(200, 200, 208) : QColor(150, 150, 158);
-    QPen pen(penColor);
-    pen.setWidthF(1.4);
-    pen.setCapStyle(Qt::RoundCap);
-    pen.setJoinStyle(Qt::RoundJoin);
-    p.setPen(pen);
-    p.setBrush(Qt::NoBrush);
-
-    const qreal cx = 8.0, cy = 8.0;
-    const qreal hw = 16 * 0.44;
-    const qreal hh = 16 * 0.30;
-
-    QPainterPath eyePath;
-    eyePath.moveTo(cx - hw, cy);
-    eyePath.quadTo(cx, cy - hh * 2.2, cx + hw, cy);
-    eyePath.quadTo(cx, cy + hh * 2.2, cx - hw, cy);
-    p.drawPath(eyePath);
-
-    const qreal pr = hh * 0.72;
-    p.setBrush(penColor);
-    p.setPen(Qt::NoPen);
-    p.drawEllipse(QPointF(cx, cy), pr, pr);
-
-    if (!bVisible)
-    {
-      p.setBrush(Qt::NoBrush);
-      QPen slashPen(QColor(200, 80, 80));
-      slashPen.setWidthF(1.6);
-      slashPen.setCapStyle(Qt::RoundCap);
-      p.setPen(slashPen);
-      const qreal d = 16 * 0.38;
-      p.drawLine(QPointF(cx - d, cy + d * 0.8), QPointF(cx + d, cy - d * 0.8));
-    }
-
-    return QIcon(pixmap);
-  }
-
-  QIcon MakeHierarchyLockIcon(bool bLocked)
-  {
-    QPixmap pixmap(16, 16);
-    pixmap.fill(Qt::transparent);
-
-    QPainter p(&pixmap);
-    p.setOpacity(bLocked ? 0.95 : 0.35);
-    p.setRenderHint(QPainter::Antialiasing);
-
-    const QColor color = bLocked ? QColor(220, 120, 110) : QColor(175, 175, 185);
-    QPen pen(color);
-    pen.setWidthF(1.4);
-    pen.setCapStyle(Qt::RoundCap);
-    pen.setJoinStyle(Qt::RoundJoin);
-    p.setPen(pen);
-
-    const qreal cx = 8.0;
-    const qreal top = 16 * 0.05;
-    const qreal bottom = 16 * 0.97;
-    const qreal totalH = bottom - top;
-
-    const qreal bodyTopY = top + totalH * 0.43;
-    const qreal bodyW = 16 * 0.65;
-    const qreal bodyH = totalH * 0.55;
-    const qreal shackleW = bodyW * 0.56;
-    const qreal shackleR = shackleW * 0.5;
-
-    QRectF bodyRect(cx - bodyW * 0.5, bodyTopY, bodyW, bodyH);
-    p.setBrush(bLocked ? QColor(220, 120, 110, 160) : Qt::NoBrush);
-    p.drawRoundedRect(bodyRect, 2.0, 2.0);
-    p.setBrush(Qt::NoBrush);
-
-    const qreal shackleBaseY = bodyTopY + 1.5;
-    const qreal archTop = top + totalH * 0.02;
-    const qreal archH = (shackleBaseY - archTop) * 2.0;
-    QRectF archRect(cx - shackleR, archTop, shackleW, archH);
-
-    QPainterPath path;
-    path.moveTo(cx - shackleR, shackleBaseY);
-    path.arcTo(archRect, 180, -180);
-
-    if (bLocked)
-    {
-      path.lineTo(cx + shackleR, shackleBaseY); // closed shackle
-    }
-    else
-    {
-      path.lineTo(cx + shackleR, archTop - totalH * 0.12); // right leg lifted
-    }
-
-    p.drawPath(path);
-
-    return QIcon(pixmap);
-  }
-
-  QIcon MakeElementTypeIcon(const QColor& color)
-  {
-    QPixmap pixmap(12, 12);
-    pixmap.fill(Qt::transparent);
-
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(color);
-    painter.drawRoundedRect(1, 1, 10, 10, 2, 2);
-
-    return QIcon(pixmap);
-  }
-
-  /// Pictographic palette icon per widget type (mockup-style, not just text).
-  QPixmap MakePaletteWidgetPixmap(const plRTTI* pType)
-  {
-    constexpr int size = 28;
-    QPixmap pixmap(size, size);
-    pixmap.fill(Qt::transparent);
-
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-
-    const QColor color = GetElementTypeColor(pType);
-    QPen pen(color);
-    pen.setWidthF(1.6);
-
-    if (pType->IsDerivedFrom<plUiTextInput>())
-    {
-      // entry box with a caret
-      painter.setPen(pen);
-      painter.drawRoundedRect(4, 9, 20, 11, 3, 3);
-      painter.setBrush(color);
-      painter.drawLine(9, 12, 9, 17); // caret
-      painter.drawLine(13, 17, 20, 17); // entered text baseline hint
-    }
-    else if (pType->IsDerivedFrom<plUiText>())
-    {
-      painter.setPen(pen);
-      painter.drawLine(6, 8, 22, 8);   // T bar
-      painter.drawLine(14, 8, 14, 22); // T stem
-    }
-    else if (pType->IsDerivedFrom<plUiToggle>())
-    {
-      // pill with a knob on the right (switch)
-      painter.setPen(pen);
-      painter.setBrush(QColor(color.red(), color.green(), color.blue(), 60));
-      painter.drawRoundedRect(4, 10, 20, 9, 4, 4);
-      painter.setBrush(color);
-      painter.setPen(Qt::NoPen);
-      painter.drawEllipse(QPoint(19, 14), 3, 3);
-    }
-    else if (pType->IsDerivedFrom<plUiSlider>())
-    {
-      // track with a handle
-      painter.setPen(pen);
-      painter.drawLine(4, 14, 24, 14);
-      painter.setBrush(color);
-      painter.setPen(Qt::NoPen);
-      painter.drawRect(14, 9, 5, 10);
-    }
-    else if (pType->IsDerivedFrom<plUiItemList>())
-    {
-      // data rows behind a scrollbar, with filled row chips (data-driven list)
-      painter.setPen(pen);
-      painter.drawRect(4, 5, 16, 18);
-      painter.setBrush(QColor(color.red(), color.green(), color.blue(), 90));
-      painter.setPen(Qt::NoPen);
-      painter.drawRect(6, 7, 12, 4);
-      painter.drawRect(6, 12, 12, 4);
-      painter.drawRect(6, 17, 12, 4);
-      painter.setBrush(color);
-      painter.drawRect(22, 8, 2, 8); // thumb
-    }
-    else if (pType->IsDerivedFrom<plUiScrollView>())
-    {
-      // stacked rows behind a scrollbar
-      painter.setPen(pen);
-      painter.drawRect(4, 5, 16, 18);
-      painter.drawLine(6, 9, 18, 9);
-      painter.drawLine(6, 14, 18, 14);
-      painter.drawLine(6, 19, 18, 19);
-      painter.setBrush(color);
-      painter.setPen(Qt::NoPen);
-      painter.drawRect(22, 8, 2, 8); // thumb
-    }
-    else if (pType->IsDerivedFrom<plUiButton>())
-    {
-      painter.setPen(pen);
-      painter.setBrush(QColor(color.red(), color.green(), color.blue(), 60));
-      painter.drawRoundedRect(4, 8, 20, 12, 4, 4);
-      painter.drawLine(10, 14, 18, 14);
-    }
-    else if (pType->IsDerivedFrom<plUiProgressBar>())
-    {
-      painter.setPen(pen);
-      painter.drawRect(4, 11, 20, 7);
-      painter.setPen(Qt::NoPen);
-      painter.setBrush(color);
-      painter.drawRect(5, 12, 12, 5);
-    }
-    else if (pType->IsDerivedFrom<plUiImage>())
-    {
-      painter.setPen(pen);
-      painter.drawRect(5, 6, 18, 16);
-      painter.setBrush(color);
-      painter.setPen(Qt::NoPen);
-      painter.drawEllipse(QPoint(11, 11), 2, 2);
-      QPolygon mountain;
-      mountain << QPoint(7, 20) << QPoint(13, 13) << QPoint(17, 17) << QPoint(20, 14) << QPoint(22, 20);
-      painter.drawPolygon(mountain);
-    }
-    else if (pType->IsDerivedFrom<plUiStackPanel>())
-    {
-      painter.setPen(pen);
-      painter.drawRect(5, 5, 18, 4);
-      painter.drawRect(5, 12, 18, 4);
-      painter.drawRect(5, 19, 18, 4);
-    }
-    else if (pType->IsDerivedFrom<plUiGridPanel>())
-    {
-      painter.setPen(pen);
-      painter.drawRect(5, 6, 8, 7);
-      painter.drawRect(15, 6, 8, 7);
-      painter.drawRect(5, 15, 8, 7);
-      painter.drawRect(15, 15, 8, 7);
-    }
-    else if (pType->IsDerivedFrom<plUiSubDocument>())
-    {
-      // a document nested inside a frame
-      painter.setPen(pen);
-      painter.drawRect(4, 5, 20, 18);
-      painter.setBrush(QColor(color.red(), color.green(), color.blue(), 70));
-      painter.drawRect(9, 10, 10, 8);
-      painter.drawLine(9, 21, 13, 21);
-    }
-    else if (pType->IsDerivedFrom<plUiSpacer>() || pType == plGetStaticRTTI<plUiElement>())
-    {
-      // spacer: dashed box with a vertical gap arrow
-      pen.setStyle(Qt::DotLine);
-      painter.setPen(pen);
-      painter.drawRect(5, 6, 18, 16);
-      pen.setStyle(Qt::SolidLine);
-      painter.setPen(pen);
-      painter.drawLine(14, 9, 14, 19);
-      painter.drawLine(11, 12, 14, 9);
-      painter.drawLine(17, 12, 14, 9);
-      painter.drawLine(11, 16, 14, 19);
-      painter.drawLine(17, 16, 14, 19);
-    }
-    else // panel / container
-    {
-      painter.setPen(pen);
-      painter.drawRoundedRect(4, 5, 20, 18, 2, 2);
-      pen.setStyle(Qt::DotLine);
-      painter.setPen(pen);
-      painter.drawRect(8, 9, 12, 10);
-    }
-
-    return pixmap;
-  }
-
-  /// Small preview pixmap for one anchor preset button: outer rect = parent, inner marker = anchor placement.
-  QPixmap MakeAnchorPresetPixmap(plInt8 iCol, plInt8 iRow)
-  {
-    constexpr int size = 20;
-    QPixmap pixmap(size, size);
-    pixmap.fill(Qt::transparent);
-
-    QPainter painter(&pixmap);
-    painter.setPen(QColor(110, 110, 110));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawRect(2, 2, size - 5, size - 5);
-
-    const QColor accent(0xB9, 0x96, 0xCD); // GetCategoryColor("UI") PastelLavender
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(accent);
-
-    constexpr int inner = 5;
-    const int minPos = 4;
-    const int midPos = (size - inner) / 2;
-    const int maxPos = size - 4 - inner;
-
-    int x = midPos, y = midPos, w = inner, h = inner;
-
-    if (iCol == 0)
-      x = minPos;
-    else if (iCol == 2)
-      x = maxPos;
-    else if (iCol == 3)
-    {
-      x = minPos;
-      w = maxPos + inner - minPos;
-    }
-
-    if (iRow == 0)
-      y = minPos;
-    else if (iRow == 2)
-      y = maxPos;
-    else if (iRow == 3)
-    {
-      y = minPos;
-      h = maxPos + inner - minPos;
-    }
-
-    painter.drawRect(x, y, w, h);
-
-    return pixmap;
-  }
 } // namespace
 
-plQtUiRulerWidget::plQtUiRulerWidget(Qt::Orientation orientation, QWidget* pParent)
-  : QWidget(pParent)
-  , m_Orientation(orientation)
+plUiDocumentAssetDocumentWindow::plUiDocumentAssetDocumentWindow(plAssetDocument* pDocument)
+  : plEngineDocumentWindow(pDocument)
 {
-  if (orientation == Qt::Horizontal)
-  {
-    setFixedHeight(20);
-  }
-  else
-  {
-    setFixedWidth(20);
-  }
-}
-
-void plQtUiRulerWidget::paintEvent(QPaintEvent* pEvent)
-{
-  QPainter painter(this);
-  painter.fillRect(rect(), QColor(25, 25, 25));
-
-  if (!m_GetTransform)
-    return;
-
-  float fScale = 1.0f;
-  float fOrigin = 0.0f;
-  m_GetTransform(fScale, fOrigin);
-
-  if (fScale <= 0.0f)
-    return;
-
-  // pick a canvas-space step that yields at least ~60 widget pixels between labels
-  const float steps[] = {10, 25, 50, 100, 200, 500, 1000, 2000};
-  float fStep = steps[PL_ARRAY_SIZE(steps) - 1];
-  for (float fCandidate : steps)
-  {
-    if (fCandidate * fScale >= 60.0f)
-    {
-      fStep = fCandidate;
-      break;
-    }
-  }
-
-  painter.setPen(QColor(90, 90, 90));
-  QFont font = painter.font();
-  font.setPointSizeF(6.5);
-  painter.setFont(font);
-
-  const int iLength = m_Orientation == Qt::Horizontal ? width() : height();
-
-  const float fFirstCanvas = plMath::Floor((0.0f - fOrigin) / fScale / fStep) * fStep;
-
-  for (float fCanvas = fFirstCanvas;; fCanvas += fStep)
-  {
-    const float fWidgetPos = fCanvas * fScale + fOrigin;
-    if (fWidgetPos > iLength)
-      break;
-    if (fWidgetPos < 0)
-      continue;
-
-    const QString label = QString::number(static_cast<int>(fCanvas));
-
-    if (m_Orientation == Qt::Horizontal)
-    {
-      painter.drawLine(QPointF(fWidgetPos, 12), QPointF(fWidgetPos, 20));
-      painter.drawText(QPointF(fWidgetPos + 2, 9), label);
-
-      // minor ticks
-      for (int i = 1; i < 4; ++i)
-      {
-        const float fMinor = fWidgetPos + (fStep * fScale * i) / 4.0f;
-        painter.drawLine(QPointF(fMinor, 16), QPointF(fMinor, 20));
-      }
-    }
-    else
-    {
-      painter.drawLine(QPointF(12, fWidgetPos), QPointF(20, fWidgetPos));
-
-      painter.save();
-      painter.translate(9, fWidgetPos + 2);
-      painter.rotate(90);
-      painter.drawText(QPointF(0, 0), label);
-      painter.restore();
-
-      for (int i = 1; i < 4; ++i)
-      {
-        const float fMinor = fWidgetPos + (fStep * fScale * i) / 4.0f;
-        painter.drawLine(QPointF(16, fMinor), QPointF(20, fMinor));
-      }
-    }
-  }
-}
-
-plQtUiHierarchyTreeWidget::plQtUiHierarchyTreeWidget(QWidget* pParent)
-  : QTreeWidget(pParent)
-{
-  setDragEnabled(true);
-  setAcceptDrops(true);
-  setDropIndicatorShown(true);
-  setDragDropMode(QAbstractItemView::InternalMove);
-}
-
-void plQtUiHierarchyTreeWidget::keyPressEvent(QKeyEvent* pEvent)
-{
-  if (pEvent->key() == Qt::Key_Delete && m_OnDeleteKey)
-  {
-    m_OnDeleteKey();
-    pEvent->accept();
-    return;
-  }
-
-  QTreeWidget::keyPressEvent(pEvent);
-}
-
-void plQtUiHierarchyTreeWidget::dropEvent(QDropEvent* pEvent)
-{
-  pEvent->accept();
-
-  if (!m_OnMoveItems)
-    return;
-
-  QTreeWidgetItem* pTargetItem = itemAt(pEvent->position().toPoint());
-
-  QTreeWidgetItem* pNewParent = nullptr;
-  int iIndex = -1;
-
-  switch (dropIndicatorPosition())
-  {
-    case QAbstractItemView::OnItem:
-      pNewParent = pTargetItem;
-      iIndex = -1; // append as child
-      break;
-
-    case QAbstractItemView::AboveItem:
-      pNewParent = pTargetItem != nullptr ? pTargetItem->parent() : nullptr;
-      iIndex = pTargetItem != nullptr ? (pNewParent != nullptr ? pNewParent->indexOfChild(pTargetItem) : indexOfTopLevelItem(pTargetItem)) : -1;
-      break;
-
-    case QAbstractItemView::BelowItem:
-      pNewParent = pTargetItem != nullptr ? pTargetItem->parent() : nullptr;
-      iIndex = pTargetItem != nullptr ? (pNewParent != nullptr ? pNewParent->indexOfChild(pTargetItem) : indexOfTopLevelItem(pTargetItem)) + 1 : -1;
-      break;
-
-    case QAbstractItemView::OnViewport:
-    default:
-      pNewParent = nullptr;
-      iIndex = -1; // append at root
-      break;
-  }
-
-  m_OnMoveItems(selectedItems(), pNewParent, iIndex);
-}
-
-plQtUiDocumentAssetDocumentWindow::plQtUiDocumentAssetDocumentWindow(plAssetDocument* pDocument)
-  : plQtEngineDocumentWindow(pDocument)
-{
-  // Menu Bar
-  {
-    plQtMenuBarActionMapView* pMenuBar = static_cast<plQtMenuBarActionMapView*>(menuBar());
-    plActionContext context;
-    context.m_sMapping = "UiDocumentAssetMenuBar";
-    context.m_pDocument = pDocument;
-    context.m_pWindow = this;
-    pMenuBar->SetActionContext(context);
-  }
-
-  // Tool Bar
-  {
-    plQtToolBarActionMapView* pToolBar = new plQtToolBarActionMapView("Toolbar", this);
-    plActionContext context;
-    context.m_sMapping = "UiDocumentAssetToolBar";
-    context.m_pDocument = pDocument;
-    context.m_pWindow = this;
-    pToolBar->SetActionContext(context);
-    pToolBar->setObjectName("UiDocumentAssetWindowToolBar");
-    addToolBar(pToolBar);
-  }
-
-  // Canvas View (with rulers)
-  plQtViewWidgetContainer* pContainer = nullptr;
-  {
-    SetTargetFramerate(25);
-
-    m_ViewConfig.m_Camera.LookAt(plVec3(-1.6f, 0, 0), plVec3(0, 0, 0), plVec3(0, 0, 1));
-    m_ViewConfig.ApplyPerspectiveSetting(90);
-
-    m_pViewWidget = new plQtEngineViewWidget(nullptr, this, &m_ViewConfig);
-    AddViewWidget(m_pViewWidget);
-    pContainer = new plQtViewWidgetContainer(this, m_pViewWidget, nullptr);
-
-    QWidget* pCanvasArea = new QWidget(this);
-    QGridLayout* pGrid = new QGridLayout(pCanvasArea);
-    pGrid->setContentsMargins(0, 0, 0, 0);
-    pGrid->setSpacing(0);
-
-    m_pHRuler = new plQtUiRulerWidget(Qt::Horizontal, pCanvasArea);
-    m_pHRuler->m_GetTransform = [this](float& fScale, float& fOrigin)
-    {
-      float fS = 1.0f;
-      plVec2 vOffset, vCanvasSize;
-      GetCanvasTransform(fS, vOffset, vCanvasSize);
-      const float fDpr = static_cast<float>(m_pViewWidget->devicePixelRatioF());
-      fScale = fS / fDpr;
-      fOrigin = vOffset.x / fDpr;
-    };
-
-    m_pVRuler = new plQtUiRulerWidget(Qt::Vertical, pCanvasArea);
-    m_pVRuler->m_GetTransform = [this](float& fScale, float& fOrigin)
-    {
-      float fS = 1.0f;
-      plVec2 vOffset, vCanvasSize;
-      GetCanvasTransform(fS, vOffset, vCanvasSize);
-      const float fDpr = static_cast<float>(m_pViewWidget->devicePixelRatioF());
-      fScale = fS / fDpr;
-      fOrigin = vOffset.y / fDpr;
-    };
-
-    QWidget* pCorner = new QWidget(pCanvasArea);
-    pCorner->setFixedSize(20, 20);
-    pCorner->setStyleSheet("background-color: #191919;");
-
-    pGrid->addWidget(pCorner, 0, 0);
-    pGrid->addWidget(m_pHRuler, 0, 1);
-    pGrid->addWidget(m_pVRuler, 1, 0);
-    pGrid->addWidget(pContainer, 1, 1);
-
-    plQtDocumentPanel* pCentralPanel = new plQtDocumentPanel(this, pDocument);
-    pCentralPanel->setObjectName("UiDocumentAssetCanvasCentral");
-    pCentralPanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.Canvas")));
-    pCentralPanel->setWidget(pCanvasArea, ads::CDockWidget::ForceNoScrollArea);
-
-    m_pDockManager->setCentralWidget(pCentralPanel);
-
-    m_pViewWidget->installEventFilter(this);
-    m_pViewWidget->setMouseTracking(true); // hover updates for interact mode
-    m_pViewWidget->setAcceptDrops(true);   // palette widgets drag onto the canvas
-  }
-
-  CreateCanvasToolBar();
-
-  // Palette + Hierarchy: two independent docks, stacked on the left
-  {
-    plQtDocumentPanel* pPalettePanel = new plQtDocumentPanel(this, pDocument);
-    pPalettePanel->setObjectName("UiDocumentAssetPaletteDockWidget");
-    pPalettePanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.Palette")));
-    pPalettePanel->show();
-    pPalettePanel->setWidget(CreatePaletteWidget(pPalettePanel), ads::CDockWidget::ForceNoScrollArea);
-
-    ads::CDockAreaWidget* pPaletteArea = m_pDockManager->addDockWidgetTab(ads::LeftDockWidgetArea, pPalettePanel);
-
-    plQtDocumentPanel* pHierarchyPanel = new plQtDocumentPanel(this, pDocument);
-    pHierarchyPanel->setObjectName("UiDocumentAssetHierarchyDockWidget");
-    pHierarchyPanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.Hierarchy")));
-    pHierarchyPanel->show();
-    pHierarchyPanel->setWidget(CreateHierarchyWidget(pHierarchyPanel), ads::CDockWidget::ForceNoScrollArea);
-
-    m_pDockManager->addDockWidget(ads::BottomDockWidgetArea, pHierarchyPanel, pPaletteArea);
-  }
-
-  // Property Grid (with the rect transform editor at the top)
-  {
-    plQtDocumentPanel* pPropertyPanel = new plQtDocumentPanel(this, pDocument);
-    pPropertyPanel->setObjectName("UiDocumentAssetDockWidget");
-    pPropertyPanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.Properties")));
-    pPropertyPanel->show();
-
-    plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, pDocument);
-
-    QWidget* pWidget = new QWidget();
-    pWidget->setObjectName("Group");
-    pWidget->setLayout(new QVBoxLayout());
-    pWidget->setContentsMargins(0, 0, 0, 0);
-
-    pWidget->layout()->setContentsMargins(0, 0, 0, 0);
-    pWidget->layout()->addWidget(new plQtAssetStatusIndicator(GetDocument()));
-    pWidget->layout()->addWidget(CreateRectTransformWidget(pWidget));
-    pWidget->layout()->addWidget(pPropertyGrid);
-
-    pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);
-
-    ads::CDockAreaWidget* pPropertyArea = m_pDockManager->addDockWidgetTab(ads::RightDockWidgetArea, pPropertyPanel);
-
-    // effective-style inspector: its own tab next to Properties (mockup's Properties | Style)
-    plQtDocumentPanel* pStylePanel = new plQtDocumentPanel(this, pDocument);
-    pStylePanel->setObjectName("UiDocumentAssetStyleDockWidget");
-    pStylePanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.Style")));
-    pStylePanel->show();
-    pStylePanel->setWidget(CreateEffectiveStyleWidget(pStylePanel), ads::CDockWidget::ForceNoScrollArea);
-
-    m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, pStylePanel, pPropertyArea);
-    pPropertyPanel->raise(); // Properties stays the front tab
-
-    pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
-  }
-
-  // Bindings & Mock Data
-  {
-    plQtDocumentPanel* pBindingsPanel = new plQtDocumentPanel(this, pDocument);
-    pBindingsPanel->setObjectName("UiDocumentAssetBindingsDockWidget");
-    pBindingsPanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.Bindings")));
-    pBindingsPanel->show();
-
-    m_pBindingsPanel = new plQtUiBindingsPanel(pBindingsPanel);
-    connect(m_pBindingsPanel, &plQtUiBindingsPanel::MockDataChanged, this, [this]() { SendMockBlackboardToEngine(); });
-    connect(m_pBindingsPanel, &plQtUiBindingsPanel::AddBindingRequested, this, [this]() { OnAddBindingRequested(); });
-    connect(m_pBindingsPanel, &plQtUiBindingsPanel::RemoveBindingRequested, this, [this](plUuid guid, QString sProp) { OnRemoveBindingRequested(guid, sProp); });
-    connect(m_pBindingsPanel, &plQtUiBindingsPanel::BindingEntryEdited, this, [this](plUuid guid, QString sProp, QString sEntry) { OnBindingEntryEdited(guid, sProp, sEntry); });
-    connect(m_pBindingsPanel, &plQtUiBindingsPanel::BindingRowActivated, this, [this](plUuid guid) { OnBindingRowActivated(guid); });
-    connect(m_pBindingsPanel, &plQtUiBindingsPanel::ScenarioSaveRequested, this, [this](QString sName) { OnScenarioSaveRequested(sName); });
-    connect(m_pBindingsPanel, &plQtUiBindingsPanel::ScenarioDeleteRequested, this, [this](QString sName) { OnScenarioDeleteRequested(sName); });
-    connect(m_pBindingsPanel, &plQtUiBindingsPanel::ScenarioSelected, this, [this](QString sName) { OnScenarioSelected(sName); });
-
-    pBindingsPanel->setWidget(m_pBindingsPanel, ads::CDockWidget::ForceNoScrollArea);
-
-    ads::CDockAreaWidget* pBindingsArea = m_pDockManager->addDockWidgetTab(ads::BottomDockWidgetArea, pBindingsPanel);
-
-    // Animation timeline (tabbed with the bindings dock)
-    plQtDocumentPanel* pAnimationsPanel = new plQtDocumentPanel(this, pDocument);
-    pAnimationsPanel->setObjectName("UiDocumentAssetAnimationsDockWidget");
-    pAnimationsPanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.Animations")));
-    pAnimationsPanel->show();
-
-    m_pAnimationsPanel = new plQtUiAnimationsPanel(pAnimationsPanel);
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::AddClipRequested, this, [this]() { OnAddClipRequested(); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::RemoveClipRequested, this, [this](plUuid guid) { OnRemoveClipRequested(guid); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::ClipActivated, this, [this](plUuid guid) { OnClipActivated(guid); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::ClipRenamed, this, [this](plUuid guid, QString sName)
-      {
-        if (const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(guid))
-        {
-          auto pAccessor = GetDocument()->GetObjectAccessor();
-          pAccessor->StartTransaction("Rename UI Animation Clip");
-          pAccessor->SetValueByName(pObj, "Name", plString(sName.toUtf8().data())).IgnoreResult();
-          pAccessor->FinishTransaction();
-        }
-      });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::ClipDurationChanged, this, [this](plUuid guid, float fDuration)
-      {
-        if (const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(guid))
-        {
-          auto pAccessor = GetDocument()->GetObjectAccessor();
-          pAccessor->StartTransaction("Change UI Animation Clip Duration");
-          pAccessor->SetValueByName(pObj, "Duration", fDuration).IgnoreResult();
-          pAccessor->FinishTransaction();
-        }
-      });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::AddTrackRequested, this, [this](plUuid guid) { OnAddTrackRequested(guid); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::RemoveTrackRequested, this, [this](plUuid guid) { OnRemoveTrackRequested(guid); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::AddKeyRequested, this, [this](plUuid guid, float fTime) { OnAddKeyRequested(guid, fTime); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::RemoveKeyRequested, this, [this](plUuid guid) { OnRemoveKeyRequested(guid); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::KeyMoved, this, [this](plUuid guid, float fTime) { OnKeyMoved(guid, fTime); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::KeyEdited, this, [this](plUuid guid, float fTime, float fValue, plColor color, int iEasing) { OnKeyEdited(guid, fTime, fValue, color, iEasing); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::Scrubbed, this, [this](QString sName, float fTime) { OnClipScrubbed(sName, fTime); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::PlayRequested, this, [this](QString sName) { OnClipPlay(sName); });
-    connect(m_pAnimationsPanel, &plQtUiAnimationsPanel::StopRequested, this, [this]() { OnClipStop(); });
-
-    pAnimationsPanel->setWidget(m_pAnimationsPanel, ads::CDockWidget::ForceNoScrollArea);
-
-    m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, pAnimationsPanel, pBindingsArea);
-
-    // States & transitions (third tab)
-    plQtDocumentPanel* pStatesPanel = new plQtDocumentPanel(this, pDocument);
-    pStatesPanel->setObjectName("UiDocumentAssetStatesDockWidget");
-    pStatesPanel->setWindowTitle(plMakeQString(plTranslate("GameUi.Panel.States")));
-    pStatesPanel->show();
-
-    m_pStatesPanel = new plQtUiStatesPanel(pStatesPanel);
-    connect(m_pStatesPanel, &plQtUiStatesPanel::DisabledBindingChanged, this, [this](plUuid guid, QString sValue) { OnElementStringPropertyChanged(guid, "DisabledBinding", sValue); });
-    connect(m_pStatesPanel, &plQtUiStatesPanel::AddStateRequested, this, [this](plUuid guid) { OnAddStateRequested(guid); });
-    connect(m_pStatesPanel, &plQtUiStatesPanel::RemoveStateRequested, this, [this](plUuid guid) { OnRemoveStateRequested(guid); });
-    connect(m_pStatesPanel, &plQtUiStatesPanel::StateEdited, this, [this](plUuid guid, QString sName, QString sEntry, int iCondition, double fValue, QString sValueText, int iVisibility, QString sPlayClip) { OnStateEdited(guid, sName, sEntry, iCondition, fValue, sValueText, iVisibility, sPlayClip); });
-    connect(m_pStatesPanel, &plQtUiStatesPanel::StateStyleChanged, this, [this](plUuid guid, QString sStyleRef) { OnElementStringPropertyChanged(guid, "Style", sStyleRef); });
-    connect(m_pStatesPanel, &plQtUiStatesPanel::StateActivated, this, [this](plUuid guid) { OnClipActivated(guid); }); // same "select object in the grid" behavior
-    connect(m_pStatesPanel, &plQtUiStatesPanel::TestValueChanged, this, [this](QString sEntry, QString sValue) { OnMockTestValue(sEntry, sValue); });
-
-    pStatesPanel->setWidget(m_pStatesPanel, ads::CDockWidget::ForceNoScrollArea);
-
-    m_pDockManager->addDockWidget(ads::CenterDockWidgetArea, pStatesPanel, pBindingsArea);
-
-    // keep the bindings tab in front by default
-    pBindingsArea->setCurrentDockWidget(pBindingsPanel);
-  }
-
-  // Status Bar: engine indicator | selection | draw stats (mockup's three segments)
-  {
-    m_pEngineStatusLabel = new QLabel(this);
-    statusBar()->addWidget(m_pEngineStatusLabel);
-    SetEngineConnectedIndicator(true);
-
-    m_pStatusLabel = new QLabel(this);
-    statusBar()->addWidget(m_pStatusLabel, 1);
-
-    m_pDrawStatsLabel = new QLabel(this);
-    m_pDrawStatsLabel->setStyleSheet(QStringLiteral("color: #8e8e8e;"));
-    statusBar()->addPermanentWidget(m_pDrawStatsLabel);
-  }
-
   m_pAssetDoc = static_cast<plUiDocumentAssetDocument*>(pDocument);
 
-  // live preview: push the widget tree to the engine resource on every edit
-  m_pAssetDoc->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plQtUiDocumentAssetDocumentWindow::PropertyEventHandler, this));
-  m_pAssetDoc->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plQtUiDocumentAssetDocumentWindow::StructureEventHandler, this));
-  m_pAssetDoc->GetSelectionManager()->m_Events.AddEventHandler(plMakeDelegate(&plQtUiDocumentAssetDocumentWindow::SelectionEventHandler, this));
-  plEditorEngineProcessConnection::s_Events.AddEventHandler(plMakeDelegate(&plQtUiDocumentAssetDocumentWindow::EngineProcessEventHandler, this));
+  SetMenuBarActions("UiDocumentAssetMenuBar");
+  SetToolBarActions("UiDocumentAssetToolBar");
 
-  FinishWindowCreation();
+  CreateCanvasView();
+  CreateCanvasChrome();
+
+  CollectLanguages();
+  UpdateLayoutContext();
+  CreateCanvasToolBar();
+
+  // the panels; plUiDocumentShellPanels arranges them around the view and the properties
+  CreatePalettePanel();
+  CreateHierarchyPanel();
+  CreateRectTransformPanel();
+  m_pEffectiveStyleView = AddPanel<plUiEffectiveStyleView>({"Style", plTranslate("GameUi.Panel.Style")});
+  CreateTextFitPanels();
+  CreateBindingsPanel();
+  CreateStatesPanel();
+  CreateAnimationsPanel();
+
+  // the shell's properties panel follows the selection
+  pDocument->GetSelectionManager()->SetSelection(pDocument->GetObjectManager()->GetRootObject()->GetChildren()[0]);
+
+  SetEngineConnectedIndicator(true);
+
+  // live preview: push the widget tree to the engine resource on every edit
+  m_pAssetDoc->GetObjectManager()->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plUiDocumentAssetDocumentWindow::PropertyEventHandler, this));
+  m_pAssetDoc->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plUiDocumentAssetDocumentWindow::StructureEventHandler, this));
+  m_pAssetDoc->GetSelectionManager()->m_Events.AddEventHandler(plMakeDelegate(&plUiDocumentAssetDocumentWindow::SelectionEventHandler, this));
+  plEditorEngineProcessConnection::s_Events.AddEventHandler(plMakeDelegate(&plUiDocumentAssetDocumentWindow::EngineProcessEventHandler, this));
 
   UpdatePreview();
   RebuildHierarchy();
@@ -800,24 +121,77 @@ plQtUiDocumentAssetDocumentWindow::plQtUiDocumentAssetDocumentWindow(plAssetDocu
   UpdateStatesPanel();
 }
 
-plQtUiDocumentAssetDocumentWindow::~plQtUiDocumentAssetDocumentWindow()
+plUiDocumentAssetDocumentWindow::~plUiDocumentAssetDocumentWindow()
 {
-  m_pAssetDoc->GetObjectManager()->m_PropertyEvents.RemoveEventHandler(plMakeDelegate(&plQtUiDocumentAssetDocumentWindow::PropertyEventHandler, this));
-  m_pAssetDoc->GetObjectManager()->m_StructureEvents.RemoveEventHandler(plMakeDelegate(&plQtUiDocumentAssetDocumentWindow::StructureEventHandler, this));
-  m_pAssetDoc->GetSelectionManager()->m_Events.RemoveEventHandler(plMakeDelegate(&plQtUiDocumentAssetDocumentWindow::SelectionEventHandler, this));
-  plEditorEngineProcessConnection::s_Events.RemoveEventHandler(plMakeDelegate(&plQtUiDocumentAssetDocumentWindow::EngineProcessEventHandler, this));
+  m_pAssetDoc->GetObjectManager()->m_PropertyEvents.RemoveEventHandler(plMakeDelegate(&plUiDocumentAssetDocumentWindow::PropertyEventHandler, this));
+  m_pAssetDoc->GetObjectManager()->m_StructureEvents.RemoveEventHandler(plMakeDelegate(&plUiDocumentAssetDocumentWindow::StructureEventHandler, this));
+  m_pAssetDoc->GetSelectionManager()->m_Events.RemoveEventHandler(plMakeDelegate(&plUiDocumentAssetDocumentWindow::SelectionEventHandler, this));
+  if (m_pViewWidget != nullptr)
+    m_pViewWidget->m_InputEvents.RemoveEventHandler(plMakeDelegate(&plUiDocumentAssetDocumentWindow::OnViewInput, this));
+  plEditorEngineProcessConnection::s_Events.RemoveEventHandler(plMakeDelegate(&plUiDocumentAssetDocumentWindow::EngineProcessEventHandler, this));
+
+  // the panels' contents use the window's members (the bindings and states views, the canvas transform)
+  DestroyPanels();
 
   RestoreResource();
 }
 
-void plQtUiDocumentAssetDocumentWindow::InternalRedraw()
+void plUiDocumentAssetDocumentWindow::CreateCanvasView()
+{
+  SetTargetFramerate(25);
+
+  m_ViewConfig.m_Camera.LookAt(plVec3(-1.6f, 0, 0), plVec3(0, 0, 0), plVec3(0, 0, 1));
+  m_ViewConfig.ApplyPerspectiveSetting(90);
+
+  auto* pCanvasView = new plUiCanvasViewWidget(this, &m_ViewConfig);
+  pCanvasView->m_OnPaletteDrop = [this](const plRTTI* pType, const plVec2I32& viewPos)
+  { AddElementAt(pType, viewPos); };
+
+  m_pViewWidget = pCanvasView;
+  AddViewWidget(m_pViewWidget);
+  m_pViewWidget->m_InputEvents.AddEventHandler(plMakeDelegate(&plUiDocumentAssetDocumentWindow::OnViewInput, this));
+}
+
+void plUiDocumentAssetDocumentWindow::CreateCanvasChrome()
+{
+  // the contents' surfaces need the UI renderer
+  plEngineUiRenderer::EnsureRenderer();
+
+  // the rulers follow the canvas transform, in logical units of the view; the horizontal ruler draws the corner square
+  // over the vertical one
+  m_pHRulerView = PL_DEFAULT_NEW(plUiRulerView, true, plUiRulerView::Thickness);
+  m_pHRulerView->m_GetTransform = [this](float& fScale, float& fOrigin)
+  {
+    float fS = 1.0f;
+    plVec2 vOffset, vCanvasSize;
+    GetCanvasTransform(fS, vOffset, vCanvasSize);
+    const float fDpr = m_pViewWidget->GetViewportPixelRatio();
+    fScale = fS / fDpr;
+    fOrigin = vOffset.x / fDpr;
+  };
+
+  m_pVRulerView = PL_DEFAULT_NEW(plUiRulerView, false);
+  m_pVRulerView->m_GetTransform = [this](float& fScale, float& fOrigin)
+  {
+    float fS = 1.0f;
+    plVec2 vOffset, vCanvasSize;
+    GetCanvasTransform(fS, vOffset, vCanvasSize);
+    const float fDpr = m_pViewWidget->GetViewportPixelRatio();
+    fScale = fS / fDpr;
+    fOrigin = vOffset.y / fDpr;
+  };
+
+  m_pCanvasStatusRow = PL_DEFAULT_NEW(plUiCanvasStatusRow);
+}
+
+void plUiDocumentAssetDocumentWindow::InternalRedraw()
 {
   plEditorInputContext::UpdateActiveInputContext();
   SendRedrawMsg();
-  plQtEngineDocumentWindow::InternalRedraw();
+  plEngineDocumentWindow::InternalRedraw();
 }
 
-void plQtUiDocumentAssetDocumentWindow::SendRedrawMsg()
+void plUiDocumentAssetDocumentWindow::SendRedrawMsg()
 {
   // do not try to redraw while the process is crashed, it is obviously futile
   if (plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
@@ -831,7 +205,7 @@ void plQtUiDocumentAssetDocumentWindow::SendRedrawMsg()
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::UpdatePreview()
+void plUiDocumentAssetDocumentWindow::UpdatePreview()
 {
   if (plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
     return;
@@ -865,7 +239,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdatePreview()
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::RestoreResource()
+void plUiDocumentAssetDocumentWindow::RestoreResource()
 {
   plRestoreResourceMsgToEngine msg;
   msg.m_sResourceType = "UI Document";
@@ -876,7 +250,7 @@ void plQtUiDocumentAssetDocumentWindow::RestoreResource()
   plEditorEngineProcessConnection::GetSingleton()->SendMessage(&msg);
 }
 
-void plQtUiDocumentAssetDocumentWindow::PropertyEventHandler(const plDocumentObjectPropertyEvent& e)
+void plUiDocumentAssetDocumentWindow::PropertyEventHandler(const plDocumentObjectPropertyEvent& e)
 {
   UpdatePreview();
   RebuildHierarchy(); // names / title-relevant properties may have changed
@@ -886,7 +260,7 @@ void plQtUiDocumentAssetDocumentWindow::PropertyEventHandler(const plDocumentObj
   UpdateStatesPanel();
 }
 
-void plQtUiDocumentAssetDocumentWindow::StructureEventHandler(const plDocumentObjectStructureEvent& e)
+void plUiDocumentAssetDocumentWindow::StructureEventHandler(const plDocumentObjectStructureEvent& e)
 {
   switch (e.m_EventType)
   {
@@ -906,7 +280,7 @@ void plQtUiDocumentAssetDocumentWindow::StructureEventHandler(const plDocumentOb
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::SelectionEventHandler(const plSelectionManagerEvent& e)
+void plUiDocumentAssetDocumentWindow::SelectionEventHandler(const plSelectionManagerEvent& e)
 {
   SendSelectionToEngine();
   SyncHierarchySelection();
@@ -914,53 +288,27 @@ void plQtUiDocumentAssetDocumentWindow::SelectionEventHandler(const plSelectionM
   UpdateStatesPanel();
 }
 
-void plQtUiDocumentAssetDocumentWindow::SyncHierarchySelection()
+void plUiDocumentAssetDocumentWindow::SyncHierarchySelection()
 {
-  if (m_pHierarchy == nullptr || m_bIgnoreHierarchySelection)
+  if (m_pHierarchyView == nullptr || m_bIgnoreHierarchySelection)
     return;
 
-  m_bIgnoreHierarchySelection = true;
+  plHybridArray<plUuid, 16> selection;
+  for (const plDocumentObject* pObj : GetDocument()->GetSelectionManager()->GetSelection())
+    selection.PushBack(pObj->GetGuid());
 
-  m_pHierarchy->clearSelection();
-
-  const auto& selection = GetDocument()->GetSelectionManager()->GetSelection();
-
-  std::function<void(QTreeWidgetItem*)> syncItem = [&](QTreeWidgetItem* pItem)
-  {
-    const plUuid guid = plConversionUtils::ConvertStringToUuid(pItem->data(0, Qt::UserRole).toString().toUtf8().data());
-
-    for (const plDocumentObject* pObj : selection)
-    {
-      if (pObj->GetGuid() == guid)
-      {
-        pItem->setSelected(true);
-        break;
-      }
-    }
-
-    for (int i = 0; i < pItem->childCount(); ++i)
-    {
-      syncItem(pItem->child(i));
-    }
-  };
-
-  for (int i = 0; i < m_pHierarchy->topLevelItemCount(); ++i)
-  {
-    syncItem(m_pHierarchy->topLevelItem(i));
-  }
-
-  m_bIgnoreHierarchySelection = false;
+  m_pHierarchyView->SetSelection(selection);
 }
 
 //////////////////////////////////////////////////////////////////////////
 // selection → engine gizmos
 
-const plDocumentObject* plQtUiDocumentAssetDocumentWindow::GetPropertiesObject() const
+const plDocumentObject* plUiDocumentAssetDocumentWindow::GetPropertiesObject() const
 {
   return GetDocument()->GetObjectManager()->GetRootObject()->GetChildren()[0];
 }
 
-bool plQtUiDocumentAssetDocumentWindow::ComputeElementPath(const plDocumentObject* pObject, plHybridArray<plUInt32, 8>& out_path) const
+bool plUiDocumentAssetDocumentWindow::ComputeElementPath(const plDocumentObject* pObject, plHybridArray<plUInt32, 8>& out_path) const
 {
   out_path.Clear();
 
@@ -992,7 +340,7 @@ bool plQtUiDocumentAssetDocumentWindow::ComputeElementPath(const plDocumentObjec
   return true;
 }
 
-const plDocumentObject* plQtUiDocumentAssetDocumentWindow::GetElementDocObject(plArrayPtr<const plUInt32> path) const
+const plDocumentObject* plUiDocumentAssetDocumentWindow::GetElementDocObject(plArrayPtr<const plUInt32> path) const
 {
   const plDocumentObject* pCur = GetPropertiesObject();
 
@@ -1018,7 +366,7 @@ const plDocumentObject* plQtUiDocumentAssetDocumentWindow::GetElementDocObject(p
   return pCur;
 }
 
-void plQtUiDocumentAssetDocumentWindow::SendSelectionToEngine()
+void plUiDocumentAssetDocumentWindow::SendSelectionToEngine()
 {
   if (plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
     return;
@@ -1057,10 +405,10 @@ void plQtUiDocumentAssetDocumentWindow::SendSelectionToEngine()
 //////////////////////////////////////////////////////////////////////////
 // canvas mouse editing
 
-void plQtUiDocumentAssetDocumentWindow::GetCanvasTransform(float& out_fScale, plVec2& out_vOffset, plVec2& out_vCanvasSize) const
+void plUiDocumentAssetDocumentWindow::GetCanvasTransform(float& out_fScale, plVec2& out_vOffset, plVec2& out_vCanvasSize) const
 {
-  const float fDpr = static_cast<float>(m_pViewWidget->devicePixelRatioF());
-  const plVec2 vViewportSize(m_pViewWidget->width() * fDpr, m_pViewWidget->height() * fDpr);
+  const float fDpr = m_pViewWidget->GetViewportPixelRatio();
+  const plVec2 vViewportSize = m_pViewWidget->GetViewportSize() * fDpr;
 
   // mirrors plUiCanvasComponent::ComputeCanvasTransform for the preview component's settings
   if (m_vDeviceResolution.x > 0 && m_vDeviceResolution.y > 0)
@@ -1074,12 +422,14 @@ void plQtUiDocumentAssetDocumentWindow::GetCanvasTransform(float& out_fScale, pl
     return;
   }
 
-  out_fScale = plMath::Max(vViewportSize.y / s_fReferenceHeight, 0.0001f);
-  out_vOffset = plVec2::MakeZero();
-  out_vCanvasSize = vViewportSize / out_fScale;
+  // laid out at the viewport's size; drawn zoomed and panned when the preview asks for it
+  const float fLayoutScale = plMath::Max(vViewportSize.y / s_fReferenceHeight, 0.0001f);
+  out_vCanvasSize = vViewportSize / fLayoutScale;
+  out_fScale = m_fZoom > 0.0f ? m_fZoom : fLayoutScale;
+  out_vOffset = (vViewportSize - out_vCanvasSize * out_fScale) * 0.5f + m_vPan;
 }
 
-float plQtUiDocumentAssetDocumentWindow::GetCanvasScale() const
+float plUiDocumentAssetDocumentWindow::GetCanvasScale() const
 {
   float fScale = 1.0f;
   plVec2 vOffset, vCanvasSize;
@@ -1087,7 +437,7 @@ float plQtUiDocumentAssetDocumentWindow::GetCanvasScale() const
   return fScale;
 }
 
-plRectFloat plQtUiDocumentAssetDocumentWindow::GetCanvasRect() const
+plRectFloat plUiDocumentAssetDocumentWindow::GetCanvasRect() const
 {
   float fScale = 1.0f;
   plVec2 vOffset, vCanvasSize;
@@ -1095,18 +445,18 @@ plRectFloat plQtUiDocumentAssetDocumentWindow::GetCanvasRect() const
   return plRectFloat(0, 0, vCanvasSize.x, vCanvasSize.y);
 }
 
-plVec2 plQtUiDocumentAssetDocumentWindow::WidgetToCanvasPos(const QPoint& viewPos) const
+plVec2 plUiDocumentAssetDocumentWindow::WidgetToCanvasPos(const plVec2I32& viewPos) const
 {
-  const float fDpr = static_cast<float>(m_pViewWidget->devicePixelRatioF());
+  const float fDpr = m_pViewWidget->GetViewportPixelRatio();
 
   float fScale = 1.0f;
   plVec2 vOffset, vCanvasSize;
   GetCanvasTransform(fScale, vOffset, vCanvasSize);
 
-  return plVec2((viewPos.x() * fDpr - vOffset.x) / fScale, (viewPos.y() * fDpr - vOffset.y) / fScale);
+  return plVec2((viewPos.x * fDpr - vOffset.x) / fScale, (viewPos.y * fDpr - vOffset.y) / fScale);
 }
 
-void plQtUiDocumentAssetDocumentWindow::HitTestRecursive(const plUiElement* pElement, const plRectFloat& rect, const plRectFloat& parentRect, const plVec2& vPos, plHybridArray<plUInt32, 8>& ref_path, HitResult& ref_result) const
+void plUiDocumentAssetDocumentWindow::HitTestRecursive(const plUiElement* pElement, const plRectFloat& rect, const plRectFloat& parentRect, const plVec2& vPos, plHybridArray<plUInt32, 8>& ref_path, HitResult& ref_result) const
 {
   if (!pElement->m_bVisible)
     return;
@@ -1125,7 +475,7 @@ void plQtUiDocumentAssetDocumentWindow::HitTestRecursive(const plUiElement* pEle
   }
 
   plHybridArray<plRectFloat, 16> childRects;
-  plUiLayout::ComputeChildRects(pElement, rect, childRects);
+  plUiLayout::ComputeChildRects(pElement, rect, childRects, &m_LayoutContext);
 
   for (plUInt32 i = 0; i < pElement->m_Children.GetCount(); ++i)
   {
@@ -1138,7 +488,7 @@ void plQtUiDocumentAssetDocumentWindow::HitTestRecursive(const plUiElement* pEle
   }
 }
 
-bool plQtUiDocumentAssetDocumentWindow::HitTest(const plVec2& vRefPos, HitResult& out_result) const
+bool plUiDocumentAssetDocumentWindow::HitTest(const plVec2& vRefPos, HitResult& out_result) const
 {
   const plUiDocumentAssetProperties* pProps = m_pAssetDoc->GetProperties();
   const plRectFloat canvasRect = GetCanvasRect();
@@ -1152,14 +502,14 @@ bool plQtUiDocumentAssetDocumentWindow::HitTest(const plVec2& vRefPos, HitResult
 
     path.PushBack(i);
     // top level: pseudo-root, children place themselves against the canvas rect
-    HitTestRecursive(pProps->m_Children[i], pProps->m_Children[i]->ComputeRect(canvasRect), canvasRect, vRefPos, path, out_result);
+    HitTestRecursive(pProps->m_Children[i], pProps->m_Children[i]->ComputeRect(canvasRect, &m_LayoutContext), canvasRect, vRefPos, path, out_result);
     path.PopBack();
   }
 
   return out_result.m_pElement != nullptr;
 }
 
-bool plQtUiDocumentAssetDocumentWindow::GetSelectedElementRect(HitResult& out_result) const
+bool plUiDocumentAssetDocumentWindow::GetSelectedElementRect(HitResult& out_result) const
 {
   const plDocumentObject* pSelected = GetDocument()->GetSelectionManager()->GetCurrentObject();
   if (pSelected == nullptr)
@@ -1184,7 +534,7 @@ bool plQtUiDocumentAssetDocumentWindow::GetSelectedElementRect(HitResult& out_re
 
     parentRect = rect;
     const plUiElement* pChild = (*pChildren)[uiIndex];
-    rect = plUiLayout::ComputeChildRect(pParentElement, pChild, parentRect, uiIndex);
+    rect = plUiLayout::ComputeChildRect(pParentElement, pChild, parentRect, uiIndex, &m_LayoutContext);
     pParentElement = pChild;
     pElement = pChild;
     pChildren = &pElement->m_Children;
@@ -1197,279 +547,234 @@ bool plQtUiDocumentAssetDocumentWindow::GetSelectedElementRect(HitResult& out_re
   return true;
 }
 
-bool plQtUiDocumentAssetDocumentWindow::eventFilter(QObject* pObject, QEvent* pEvent)
+void plUiDocumentAssetDocumentWindow::OnViewInput(const plEditorInputEvent& e)
 {
-  if (pObject == m_pViewWidget)
+  using InputType = plEditorInputEvent::Type;
+
+  CanvasInput input;
+  input.m_Position = e.GetPosition();
+  input.m_bLeftHeld = e.IsHeld(plEditorInputEvent::LeftButton);
+
+  switch (e.m_Type)
   {
-    // rulers track the viewport size
-    if (pEvent->type() == QEvent::Resize)
-    {
-      if (m_pHRuler != nullptr)
-        m_pHRuler->update();
-      if (m_pVRuler != nullptr)
-        m_pVRuler->update();
-    }
+    case InputType::MousePress:
+      input.m_Type = CanvasInput::Type::Press;
+      input.m_uiButton = e.m_uiButton;
+      break;
 
-    // middle-mouse panning (device preset only)
-    if (m_vDeviceResolution.x > 0)
-    {
-      if (pEvent->type() == QEvent::MouseButtonPress && static_cast<QMouseEvent*>(pEvent)->button() == Qt::MiddleButton)
-      {
-        m_bPanning = true;
-        m_PanStartPos = static_cast<QMouseEvent*>(pEvent)->position().toPoint();
-        m_vPanStartValue = m_vPan;
-        return true;
-      }
+    case InputType::MouseRelease:
+      input.m_Type = CanvasInput::Type::Release;
+      input.m_uiButton = e.m_uiButton;
+      break;
 
-      if (pEvent->type() == QEvent::MouseMove && m_bPanning)
-      {
-        const QPoint pos = static_cast<QMouseEvent*>(pEvent)->position().toPoint();
-        const float fDpr = static_cast<float>(m_pViewWidget->devicePixelRatioF());
-        m_vPan = m_vPanStartValue + plVec2((pos.x() - m_PanStartPos.x()) * fDpr, (pos.y() - m_PanStartPos.y()) * fDpr);
-        RefreshCanvasView();
-        return true;
-      }
+    case InputType::MouseMove:
+      input.m_Type = CanvasInput::Type::Move;
+      break;
 
-      if (pEvent->type() == QEvent::MouseButtonRelease && static_cast<QMouseEvent*>(pEvent)->button() == Qt::MiddleButton && m_bPanning)
-      {
-        m_bPanning = false;
-        return true;
-      }
-    }
+    case InputType::Wheel:
+      input.m_Type = CanvasInput::Type::Wheel;
+      input.m_fWheelTicks = e.m_fWheel;
+      break;
 
-    // interact mode: forward mouse state to the preview instead of editing
-    // Delete removes the selected elements (works in both edit and interact mode)
-    if (pEvent->type() == QEvent::KeyPress && static_cast<QKeyEvent*>(pEvent)->key() == Qt::Key_Delete)
-    {
-      RemoveSelectedElements();
-      return true;
-    }
+    case InputType::KeyPress:
+      // typed text arrives as Character events
+      input.m_Type = CanvasInput::Type::Key;
+      input.m_Key = e.m_Key;
+      break;
 
-    // mouse-wheel zoom (device-preset canvas), anchored on the cursor
-    if (pEvent->type() == QEvent::Wheel && !m_bInteractMode && m_vDeviceResolution.x > 0)
-    {
-      QWheelEvent* pWheel = static_cast<QWheelEvent*>(pEvent);
-      const float fTicks = static_cast<float>(pWheel->angleDelta().y()) / 120.0f;
+    case InputType::Character:
+      // typed text for a focused Text Input of the interact preview
+      input.m_Type = CanvasInput::Type::Key;
+      input.m_uiCharacter = e.m_uiCharacter;
+      break;
 
-      float fScale = 1.0f;
-      plVec2 vOffset = plVec2::MakeZero();
-      plVec2 vCanvasSize = plVec2::MakeZero();
-      GetCanvasTransform(fScale, vOffset, vCanvasSize);
-
-      const float fNewZoom = plMath::Clamp(fScale * plMath::Pow(1.15f, fTicks), 0.1f, 8.0f);
-
-      // keep the canvas point under the cursor fixed
-      const plVec2 vCursor(static_cast<float>(pWheel->position().x()), static_cast<float>(pWheel->position().y()));
-      const plVec2 vCanvasPoint((vCursor.x - vOffset.x) / fScale, (vCursor.y - vOffset.y) / fScale);
-      const plVec2 vViewport(static_cast<float>(m_pViewWidget->width()), static_cast<float>(m_pViewWidget->height()));
-
-      const plVec2 vNewOffset = vCursor - vCanvasPoint * fNewZoom;
-
-      m_fZoom = fNewZoom;
-      m_vPan = vNewOffset - (vViewport - vCanvasSize * fNewZoom) * 0.5f;
-
-      // reflect the custom zoom in the combo (appended dynamic entry)
-      if (m_pZoomCombo != nullptr)
-      {
-        plQtScopedBlockSignals blockSignals(m_pZoomCombo);
-
-        const QString sText = QString("%1 %").arg(static_cast<int>(plMath::Round(fNewZoom * 100.0f)));
-
-        if (m_pZoomCombo->count() < 5)
-        {
-          m_pZoomCombo->addItem(sText, fNewZoom);
-        }
-        else
-        {
-          m_pZoomCombo->setItemText(4, sText);
-          m_pZoomCombo->setItemData(4, fNewZoom);
-        }
-
-        m_pZoomCombo->setCurrentIndex(4);
-      }
-
-      RefreshCanvasView();
-      return true;
-    }
-
-    // palette drag & drop: create the widget where it is dropped
-    if (pEvent->type() == QEvent::DragEnter || pEvent->type() == QEvent::DragMove)
-    {
-      QDropEvent* pDrag = static_cast<QDropEvent*>(pEvent);
-      if (pDrag->mimeData()->hasFormat(szUiWidgetMimeType))
-      {
-        pDrag->acceptProposedAction();
-        return true;
-      }
-      return false;
-    }
-
-    if (pEvent->type() == QEvent::Drop)
-    {
-      QDropEvent* pDrop = static_cast<QDropEvent*>(pEvent);
-      if (pDrop->mimeData()->hasFormat(szUiWidgetMimeType))
-      {
-        const QByteArray typeName = pDrop->mimeData()->data(szUiWidgetMimeType);
-
-        if (const plRTTI* pType = plRTTI::FindTypeByName(typeName.constData()))
-        {
-          AddElementAt(pType, pDrop->position().toPoint());
-        }
-
-        pDrop->acceptProposedAction();
-        return true;
-      }
-      return false;
-    }
-
-    if (m_bInteractMode)
-    {
-      // keyboard stands in for the gamepad: arrows/Enter/Escape drive the focus navigation,
-      // editing keys and typed characters feed a focused Text Input
-      if (pEvent->type() == QEvent::KeyPress && !plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
-      {
-        QKeyEvent* pKey = static_cast<QKeyEvent*>(pEvent);
-
-        plInt32 iNavAction = -1;
-        plInt32 iEditKey = -1;
-
-        switch (pKey->key())
-        {
-          case Qt::Key_Up:
-            iNavAction = plUiNavAction::Up;
-            break;
-          case Qt::Key_Down:
-            iNavAction = plUiNavAction::Down;
-            break;
-          case Qt::Key_Left:
-            iNavAction = plUiNavAction::Left;
-            break;
-          case Qt::Key_Right:
-            iNavAction = plUiNavAction::Right;
-            break;
-          case Qt::Key_Return:
-          case Qt::Key_Enter:
-            iNavAction = plUiNavAction::Accept;
-            break;
-          case Qt::Key_Escape:
-            iNavAction = plUiNavAction::Cancel;
-            break;
-          case Qt::Key_Backspace:
-            iEditKey = plUiEditKey::Backspace;
-            break;
-          case Qt::Key_Home:
-            iEditKey = plUiEditKey::Home;
-            break;
-          case Qt::Key_End:
-            iEditKey = plUiEditKey::End;
-            break;
-          default:
-            break;
-        }
-
-        if (iNavAction >= 0)
-        {
-          plDocumentConfigMsgToEngine msg;
-          msg.m_sWhatToDo = "UiNavKey";
-          msg.m_iValue = iNavAction;
-          GetEditorEngineConnection()->SendMessage(&msg);
-          return true;
-        }
-
-        if (iEditKey >= 0)
-        {
-          plDocumentConfigMsgToEngine msg;
-          msg.m_sWhatToDo = "UiEditKey";
-          msg.m_iValue = iEditKey;
-          GetEditorEngineConnection()->SendMessage(&msg);
-          return true;
-        }
-
-        // printable characters (Delete stays the element-delete shortcut, handled above)
-        const QString sText = pKey->text();
-
-        if (!sText.isEmpty())
-        {
-          bool bSent = false;
-
-          for (const uint uiCodepoint : sText.toUcs4())
-          {
-            if (uiCodepoint >= 32)
-            {
-              plDocumentConfigMsgToEngine msg;
-              msg.m_sWhatToDo = "UiChar";
-              msg.m_iValue = static_cast<plInt32>(uiCodepoint);
-              GetEditorEngineConnection()->SendMessage(&msg);
-              bSent = true;
-            }
-          }
-
-          if (bSent)
-          {
-            return true;
-          }
-        }
-      }
-
-      if (pEvent->type() == QEvent::MouseButtonPress || pEvent->type() == QEvent::MouseButtonRelease || pEvent->type() == QEvent::MouseMove)
-      {
-        QMouseEvent* pMouse = static_cast<QMouseEvent*>(pEvent);
-        const bool bDown = pMouse->buttons().testFlag(Qt::LeftButton);
-        SendInteractMouseState(pMouse->position().toPoint(), bDown);
-        return true;
-      }
-
-      if (pEvent->type() == QEvent::Wheel)
-      {
-        // forward wheel ticks so scroll views scroll in the preview
-        QWheelEvent* pWheel = static_cast<QWheelEvent*>(pEvent);
-        const float fTicks = static_cast<float>(pWheel->angleDelta().y()) / 120.0f;
-        const bool bDown = pWheel->buttons().testFlag(Qt::LeftButton);
-        SendInteractMouseState(pWheel->position().toPoint(), bDown, fTicks);
-        return true;
-      }
-
-      return plQtEngineDocumentWindow::eventFilter(pObject, pEvent);
-    }
-
-    if (pEvent->type() == QEvent::MouseButtonPress)
-    {
-      QMouseEvent* pMouse = static_cast<QMouseEvent*>(pEvent);
-      if (pMouse->button() == Qt::LeftButton)
-      {
-        BeginDrag(pMouse->pos());
-        return true;
-      }
-    }
-    else if (pEvent->type() == QEvent::MouseMove)
-    {
-      if (m_DragMode != DragMode::None)
-      {
-        UpdateDrag(static_cast<QMouseEvent*>(pEvent)->pos());
-        return true;
-      }
-    }
-    else if (pEvent->type() == QEvent::MouseButtonRelease)
-    {
-      QMouseEvent* pMouse = static_cast<QMouseEvent*>(pEvent);
-      if (pMouse->button() == Qt::LeftButton && m_DragMode != DragMode::None)
-      {
-        EndDrag(true);
-        return true;
-      }
-    }
-    else if (pEvent->type() == QEvent::KeyPress)
-    {
-      QKeyEvent* pKey = static_cast<QKeyEvent*>(pEvent);
-      if (pKey->key() == Qt::Key_Escape && m_DragMode != DragMode::None)
-      {
-        EndDrag(false);
-        return true;
-      }
-    }
+    default:
+      return;
   }
 
-  return plQtEngineDocumentWindow::eventFilter(pObject, pEvent);
+  HandleCanvasInput(input);
+}
+
+bool plUiDocumentAssetDocumentWindow::HandleCanvasInput(const CanvasInput& input)
+{
+  using Type = CanvasInput::Type;
+  using Key = plEditorPlatformKey;
+
+  // right- or middle-mouse panning
+  if (input.m_Type == Type::Press && (input.m_uiButton == plEditorInputEvent::RightButton || input.m_uiButton == plEditorInputEvent::MiddleButton) && !m_bPanning)
+  {
+    m_bPanning = true;
+    m_uiPanButton = input.m_uiButton;
+    m_PanStartPos = input.m_Position;
+    m_vPanStartValue = m_vPan;
+    return true;
+  }
+
+  if (input.m_Type == Type::Move && m_bPanning)
+  {
+    const plVec2I32 pos = input.m_Position;
+    const float fDpr = m_pViewWidget->GetViewportPixelRatio();
+    m_vPan = m_vPanStartValue + plVec2((pos.x - m_PanStartPos.x) * fDpr, (pos.y - m_PanStartPos.y) * fDpr);
+    RefreshCanvasView();
+    return true;
+  }
+
+  if (input.m_Type == Type::Release && input.m_uiButton == m_uiPanButton && m_bPanning)
+  {
+    m_bPanning = false;
+    m_uiPanButton = plEditorInputEvent::NoButton;
+    return true;
+  }
+
+  // Delete removes the selected elements (works in both edit and interact mode)
+  if (input.m_Type == Type::Key && input.m_Key == Key::Delete)
+  {
+    RemoveSelectedElements();
+    return true;
+  }
+
+  // mouse-wheel zoom (device-preset canvas), anchored on the cursor
+  if (input.m_Type == Type::Wheel && !m_bInteractMode)
+  {
+    const float fTicks = input.m_fWheelTicks;
+
+    float fScale = 1.0f;
+    plVec2 vOffset = plVec2::MakeZero();
+    plVec2 vCanvasSize = plVec2::MakeZero();
+    GetCanvasTransform(fScale, vOffset, vCanvasSize);
+
+    const float fNewZoom = plMath::Clamp(fScale * plMath::Pow(1.15f, fTicks), 0.1f, 8.0f);
+
+    // keep the canvas point under the cursor fixed
+    const plVec2 vCursor(static_cast<float>(input.m_Position.x), static_cast<float>(input.m_Position.y));
+    const plVec2 vCanvasPoint((vCursor.x - vOffset.x) / fScale, (vCursor.y - vOffset.y) / fScale);
+    const plVec2 vViewport = m_pViewWidget->GetViewportSize();
+
+    const plVec2 vNewOffset = vCursor - vCanvasPoint * fNewZoom;
+
+    m_fZoom = fNewZoom;
+    m_vPan = vNewOffset - (vViewport - vCanvasSize * fNewZoom) * 0.5f;
+
+    // the toolbar shows the custom zoom as an extra entry
+    SyncCanvasToolBar();
+    RefreshCanvasView();
+    return true;
+  }
+
+  // interact mode: forward input to the preview instead of editing
+  if (m_bInteractMode)
+  {
+    // keyboard stands in for the gamepad: arrows/Enter/Escape drive the focus navigation,
+    // editing keys and typed characters feed a focused Text Input
+    if (input.m_Type == Type::Key && !plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
+    {
+      plInt32 iNavAction = -1;
+      plInt32 iEditKey = -1;
+
+      switch (input.m_Key)
+      {
+        case Key::Up:
+          iNavAction = plUiNavAction::Up;
+          break;
+        case Key::Down:
+          iNavAction = plUiNavAction::Down;
+          break;
+        case Key::Left:
+          iNavAction = plUiNavAction::Left;
+          break;
+        case Key::Right:
+          iNavAction = plUiNavAction::Right;
+          break;
+        case Key::Enter:
+          iNavAction = plUiNavAction::Accept;
+          break;
+        case Key::Escape:
+          iNavAction = plUiNavAction::Cancel;
+          break;
+        case Key::Backspace:
+          iEditKey = plUiEditKey::Backspace;
+          break;
+        case Key::Home:
+          iEditKey = plUiEditKey::Home;
+          break;
+        case Key::End:
+          iEditKey = plUiEditKey::End;
+          break;
+        default:
+          break;
+      }
+
+      if (iNavAction >= 0)
+      {
+        plDocumentConfigMsgToEngine msg;
+        msg.m_sWhatToDo = "UiNavKey";
+        msg.m_iValue = iNavAction;
+        GetEditorEngineConnection()->SendMessage(&msg);
+        return true;
+      }
+
+      if (iEditKey >= 0)
+      {
+        plDocumentConfigMsgToEngine msg;
+        msg.m_sWhatToDo = "UiEditKey";
+        msg.m_iValue = iEditKey;
+        GetEditorEngineConnection()->SendMessage(&msg);
+        return true;
+      }
+
+      // printable characters (Delete stays the element-delete shortcut, handled above)
+      if (input.m_uiCharacter >= 32)
+      {
+        plDocumentConfigMsgToEngine msg;
+        msg.m_sWhatToDo = "UiChar";
+        msg.m_iValue = static_cast<plInt32>(input.m_uiCharacter);
+        GetEditorEngineConnection()->SendMessage(&msg);
+        return true;
+      }
+    }
+
+    if (input.m_Type == Type::Press || input.m_Type == Type::Release || input.m_Type == Type::Move)
+    {
+      SendInteractMouseState(input.m_Position, input.m_bLeftHeld);
+      return true;
+    }
+
+    if (input.m_Type == Type::Wheel)
+    {
+      // forward wheel ticks so scroll views scroll in the preview
+      SendInteractMouseState(input.m_Position, input.m_bLeftHeld, input.m_fWheelTicks);
+      return true;
+    }
+
+    return false;
+  }
+
+  // editing: select, move and resize elements, or drag anchors
+  if (input.m_Type == Type::Press && input.m_uiButton == plEditorInputEvent::LeftButton)
+  {
+    BeginDrag(input.m_Position);
+    return true;
+  }
+
+  if (input.m_Type == Type::Move && m_DragMode != DragMode::None)
+  {
+    UpdateDrag(input.m_Position);
+    return true;
+  }
+
+  if (input.m_Type == Type::Release && input.m_uiButton == plEditorInputEvent::LeftButton && m_DragMode != DragMode::None)
+  {
+    EndDrag(true);
+    return true;
+  }
+
+  if (input.m_Type == Type::Key && input.m_Key == Key::Escape && m_DragMode != DragMode::None)
+  {
+    EndDrag(false);
+    return true;
+  }
+
+  return false;
 }
 
 namespace
@@ -1496,12 +801,12 @@ namespace
   }
 } // namespace
 
-bool plQtUiDocumentAssetDocumentWindow::IsAnchorsMode() const
+bool plUiDocumentAssetDocumentWindow::IsAnchorsMode() const
 {
-  return m_pAnchorsModeAction != nullptr && m_pAnchorsModeAction->isChecked();
+  return m_bAnchorsMode;
 }
 
-void plQtUiDocumentAssetDocumentWindow::BeginDrag(const QPoint& viewPos)
+void plUiDocumentAssetDocumentWindow::BeginDrag(const plVec2I32& viewPos)
 {
   if (IsAnchorsMode())
   {
@@ -1603,7 +908,7 @@ void plQtUiDocumentAssetDocumentWindow::BeginDrag(const QPoint& viewPos)
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::BeginAnchorDrag(const QPoint& viewPos)
+void plUiDocumentAssetDocumentWindow::BeginAnchorDrag(const plVec2I32& viewPos)
 {
   const float fScale = GetCanvasScale();
   const plVec2 vRefPos = WidgetToCanvasPos(viewPos);
@@ -1614,10 +919,7 @@ void plQtUiDocumentAssetDocumentWindow::BeginAnchorDrag(const QPoint& viewPos)
   {
     if (IsContainerParent(m_pAssetDoc->GetProperties(), selected.m_Path))
     {
-      if (m_pStatusLabel != nullptr)
-      {
-        m_pStatusLabel->setText(plMakeQString(plTranslate("GameUi.Status.AnchorsInContainer")));
-      }
+      SetCanvasStatusMessage(plTranslate("GameUi.Status.AnchorsInContainer"));
     }
     else
     {
@@ -1690,7 +992,7 @@ void plQtUiDocumentAssetDocumentWindow::BeginAnchorDrag(const QPoint& viewPos)
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::UpdateDrag(const QPoint& viewPos)
+void plUiDocumentAssetDocumentWindow::UpdateDrag(const plVec2I32& viewPos)
 {
   if (!m_bDragTransactionOpen)
     return;
@@ -1699,13 +1001,13 @@ void plQtUiDocumentAssetDocumentWindow::UpdateDrag(const QPoint& viewPos)
   if (pObj == nullptr)
     return;
 
-  const float fDpr = static_cast<float>(m_pViewWidget->devicePixelRatioF());
+  const float fDpr = m_pViewWidget->GetViewportPixelRatio();
   const float fScale = GetCanvasScale();
 
-  float fDx = (viewPos.x() - m_DragStartPos.x()) * fDpr / fScale;
-  float fDy = (viewPos.y() - m_DragStartPos.y()) * fDpr / fScale;
+  float fDx = (viewPos.x - m_DragStartPos.x) * fDpr / fScale;
+  float fDy = (viewPos.y - m_DragStartPos.y) * fDpr / fScale;
 
-  const bool bSnap = m_pSnapAction == nullptr || m_pSnapAction->isChecked();
+  const bool bSnap = m_bSnap;
 
   // ————— Anchors mode: the drag edits anchor fractions, the rect stays put —————
   if (m_DragMode == DragMode::Anchor)
@@ -1865,7 +1167,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateDrag(const QPoint& viewPos)
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::EndDrag(bool bApply)
+void plUiDocumentAssetDocumentWindow::EndDrag(bool bApply)
 {
   if (m_bDragTransactionOpen)
   {
@@ -1890,7 +1192,7 @@ void plQtUiDocumentAssetDocumentWindow::EndDrag(bool bApply)
   SendGuidesToEngine({}); // clear the preview guide lines
 }
 
-void plQtUiDocumentAssetDocumentWindow::CollectSnapRects(const plHybridArray<plUInt32, 8>& excludePath)
+void plUiDocumentAssetDocumentWindow::CollectSnapRects(const plHybridArray<plUInt32, 8>& excludePath)
 {
   m_SnapRects.Clear();
 
@@ -1914,7 +1216,7 @@ void plQtUiDocumentAssetDocumentWindow::CollectSnapRects(const plHybridArray<plU
     m_SnapRects.PushBack(rect);
 
     plHybridArray<plRectFloat, 16> childRects;
-    plUiLayout::ComputeChildRects(pElement, rect, childRects);
+    plUiLayout::ComputeChildRects(pElement, rect, childRects, &m_LayoutContext);
 
     for (plUInt32 i = 0; i < pElement->m_Children.GetCount(); ++i)
     {
@@ -1933,12 +1235,12 @@ void plQtUiDocumentAssetDocumentWindow::CollectSnapRects(const plHybridArray<plU
       continue;
 
     path.PushBack(i);
-    collect(pProps->m_Children[i], pProps->m_Children[i]->ComputeRect(canvasRect));
+    collect(pProps->m_Children[i], pProps->m_Children[i]->ComputeRect(canvasRect, &m_LayoutContext));
     path.PopBack();
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::SnapDragDeltas(float& ref_fDx, float& ref_fDy, plHybridArray<SnapGuide, 4>& out_guides) const
+void plUiDocumentAssetDocumentWindow::SnapDragDeltas(float& ref_fDx, float& ref_fDy, plHybridArray<SnapGuide, 4>& out_guides) const
 {
   const float fScale = GetCanvasScale();
   const float fThreshold = 6.0f / plMath::Max(fScale, 0.001f);
@@ -2037,7 +1339,7 @@ void plQtUiDocumentAssetDocumentWindow::SnapDragDeltas(float& ref_fDx, float& re
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::SendGuidesToEngine(plArrayPtr<const SnapGuide> guides)
+void plUiDocumentAssetDocumentWindow::SendGuidesToEngine(plArrayPtr<const SnapGuide> guides)
 {
   plStringBuilder sValue;
 
@@ -2068,304 +1370,61 @@ void plQtUiDocumentAssetDocumentWindow::SendGuidesToEngine(plArrayPtr<const Snap
 //////////////////////////////////////////////////////////////////////////
 // palette + hierarchy panel
 
-namespace
+void plUiDocumentAssetDocumentWindow::CreatePalettePanel()
 {
-  /// palette button that starts a drag carrying the element type name
-  class plQtUiPaletteButton : public QToolButton
-  {
-  public:
-    plQtUiPaletteButton(QWidget* pParent, const plRTTI* pType)
-      : QToolButton(pParent)
-      , m_pType(pType)
-    {
-    }
-
-  protected:
-    virtual void mousePressEvent(QMouseEvent* pEvent) override
-    {
-      m_PressPos = pEvent->pos();
-      QToolButton::mousePressEvent(pEvent);
-    }
-
-    virtual void mouseMoveEvent(QMouseEvent* pEvent) override
-    {
-      if (pEvent->buttons().testFlag(Qt::LeftButton) && (pEvent->pos() - m_PressPos).manhattanLength() >= QApplication::startDragDistance())
-      {
-        plStringBuilder sTypeName(m_pType->GetTypeName());
-
-        QMimeData* pMime = new QMimeData();
-        pMime->setData(szUiWidgetMimeType, QByteArray(sTypeName.GetData()));
-
-        QDrag* pDrag = new QDrag(this);
-        pDrag->setMimeData(pMime);
-        pDrag->setPixmap(icon().pixmap(28, 28));
-
-        setDown(false);
-        pDrag->exec(Qt::CopyAction);
-        return;
-      }
-
-      QToolButton::mouseMoveEvent(pEvent);
-    }
-
-  private:
-    const plRTTI* m_pType;
-    QPoint m_PressPos;
-  };
-} // namespace
-
-QWidget* plQtUiDocumentAssetDocumentWindow::CreatePaletteWidget(QWidget* pParent)
-{
-  QWidget* pPanel = new QWidget(pParent);
-  QVBoxLayout* pLayout = new QVBoxLayout(pPanel);
-  pLayout->setContentsMargins(4, 4, 4, 4);
-  pLayout->setSpacing(4);
-
-  // search box filtering the widget buttons (mockup: "Search widgets...")
-  QLineEdit* pSearch = new QLineEdit(pPanel);
-  pSearch->setPlaceholderText(plMakeQString(plTranslate("GameUi.Palette.Search")));
-  pSearch->setClearButtonEnabled(true);
-  pLayout->addWidget(pSearch);
-
-  struct PaletteGroup
-  {
-    const char* m_szTitleKey;
-    QList<const plRTTI*> m_Types;
-  };
-
-  PaletteGroup groups[] = {
-    {"GameUi.Palette.GroupContainers", {plGetStaticRTTI<plUiPanel>(), plGetStaticRTTI<plUiStackPanel>(), plGetStaticRTTI<plUiGridPanel>(), plGetStaticRTTI<plUiScrollView>()}},
-    {"GameUi.Palette.GroupVisual", {plGetStaticRTTI<plUiImage>(), plGetStaticRTTI<plUiText>(), plGetStaticRTTI<plUiPath>()}},
-    {"GameUi.Palette.GroupControls", {plGetStaticRTTI<plUiButton>(), plGetStaticRTTI<plUiToggle>(), plGetStaticRTTI<plUiSlider>(), plGetStaticRTTI<plUiTextInput>(), plGetStaticRTTI<plUiProgressBar>(), plGetStaticRTTI<plUiItemList>()}},
-    {"GameUi.Palette.GroupAdvanced", {plGetStaticRTTI<plUiSubDocument>(), plGetStaticRTTI<plUiSpacer>()}},
-  };
-
-  // per-group data kept alive in the filter lambda: header, grid, and (button, label) pairs
-  struct GroupWidgets
-  {
-    QLabel* m_pHeader = nullptr;
-    QGridLayout* m_pGrid = nullptr;
-    QList<QPair<QToolButton*, QString>> m_Buttons;
-  };
-
-  auto pGroupWidgets = std::make_shared<QList<GroupWidgets>>();
-
-  for (const PaletteGroup& group : groups)
-  {
-    GroupWidgets widgets;
-
-    widgets.m_pHeader = new QLabel(plMakeQString(plTranslate(group.m_szTitleKey)), pPanel);
-    widgets.m_pHeader->setStyleSheet(plUiEditorTheme::szSectionHeader);
-    pLayout->addWidget(widgets.m_pHeader);
-
-    widgets.m_pGrid = new QGridLayout();
-    widgets.m_pGrid->setSpacing(3);
-
-    for (const plRTTI* pEntryType : group.m_Types)
-    {
-      const QString sLabel = plMakeQString(plTranslate(pEntryType->GetTypeName()));
-
-      QToolButton* pButton = new plQtUiPaletteButton(pPanel, pEntryType);
-      pButton->setText(sLabel);
-      pButton->setIcon(QIcon(MakePaletteWidgetPixmap(pEntryType)));
-      pButton->setIconSize(QSize(28, 28));
-      pButton->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-      pButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-      pButton->setToolTip(QString("%1: %2").arg(sLabel, plMakeQString(plTranslate("GameUi.Palette.AddTooltip"))));
-      pButton->setAcceptDrops(false);
-
-      connect(pButton, &QToolButton::clicked, this, [this, pEntryType]() { AddElement(pEntryType); });
-
-      widgets.m_Buttons.append({pButton, sLabel});
-    }
-
-    pGroupWidgets->append(widgets);
-    pLayout->addLayout(widgets.m_pGrid);
-  }
-
-  // (re)flows every group's grid to the buttons matching the filter; hides empty groups
-  auto applyFilter = [pGroupWidgets](const QString& sFilter)
-  {
-    for (GroupWidgets& widgets : *pGroupWidgets)
-    {
-      int iVisible = 0;
-
-      for (auto& entry : widgets.m_Buttons)
-      {
-        widgets.m_pGrid->removeWidget(entry.first);
-
-        const bool bMatch = sFilter.isEmpty() || entry.second.contains(sFilter, Qt::CaseInsensitive);
-        entry.first->setVisible(bMatch);
-
-        if (bMatch)
-        {
-          widgets.m_pGrid->addWidget(entry.first, iVisible / 2, iVisible % 2);
-          ++iVisible;
-        }
-      }
-
-      widgets.m_pHeader->setVisible(iVisible > 0);
-    }
-  };
-
-  applyFilter(QString());
-
-  connect(pSearch, &QLineEdit::textChanged, this, [applyFilter](const QString& sText) { applyFilter(sText.trimmed()); });
-
-  pLayout->addStretch();
-
-  // overflow SCROLLS instead of squeezing the buttons
-  QScrollArea* pScroll = new QScrollArea(pParent);
-  pScroll->setWidget(pPanel);
-  pScroll->setWidgetResizable(true);
-  pScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-  pScroll->setFrameShape(QFrame::NoFrame);
-
-  return pScroll;
+  m_pPaletteView = AddPanel<plUiPaletteView>({"Palette", plTranslate("GameUi.Panel.Palette")});
+  m_pPaletteView->m_OnAdd = [this](const plRTTI* pType)
+  { AddElement(pType); };
 }
 
-QWidget* plQtUiDocumentAssetDocumentWindow::CreateHierarchyWidget(QWidget* pParent)
+void plUiDocumentAssetDocumentWindow::CreateHierarchyPanel()
 {
-  m_pHierarchy = new plQtUiHierarchyTreeWidget(pParent);
-  m_pHierarchy->m_OnMoveItems = [this](const QList<QTreeWidgetItem*>& items, QTreeWidgetItem* pNewParentItem, int iIndex)
-  { OnHierarchyItemsMoved(items, pNewParentItem, iIndex); };
-  m_pHierarchy->m_OnDeleteKey = [this]() { RemoveSelectedElements(); };
-  m_pHierarchy->setColumnCount(3);
-  m_pHierarchy->setHeaderHidden(true);
-  m_pHierarchy->setSelectionMode(QAbstractItemView::ExtendedSelection);
-  m_pHierarchy->setContextMenuPolicy(Qt::CustomContextMenu);
-  m_pHierarchy->setColumnWidth(1, 24);
-  m_pHierarchy->setColumnWidth(2, 24);
-  m_pHierarchy->header()->setStretchLastSection(false);
-  m_pHierarchy->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-  m_pHierarchy->header()->setSectionResizeMode(1, QHeaderView::Fixed);
-  m_pHierarchy->header()->setSectionResizeMode(2, QHeaderView::Fixed);
+  m_pHierarchyView = AddPanel<plUiHierarchyView>({"Hierarchy", plTranslate("GameUi.Panel.Hierarchy")}, GetDocument());
+  m_pHierarchyView->m_OnSelectionChanged = [this](plArrayPtr<const plUuid> elements)
+  { SelectElements(elements); };
+  m_pHierarchyView->m_OnToggle = [this](const plUuid& guid, bool bLock)
+  { ToggleElementFlag(GetDocument()->GetObjectManager()->GetObject(guid), bLock); };
+  m_pHierarchyView->m_OnDelete = [this]()
+  { RemoveSelectedElements(); };
+  m_pHierarchyView->m_OnAdd = [this](const plRTTI* pType)
+  { AddElement(pType); };
+  m_pHierarchyView->m_OnMove = [this](plArrayPtr<const plUuid> elements, const plUuid& parentGuid, plInt32 iIndex)
+  {
+    const plDocumentObject* pNewParent = parentGuid.IsValid() ? GetDocument()->GetObjectManager()->GetObject(parentGuid) : GetPropertiesObject();
+    if (pNewParent == nullptr)
+      return;
 
-  connect(m_pHierarchy, &QTreeWidget::itemSelectionChanged, this, [this]() { OnHierarchySelectionChanged(); });
-  connect(m_pHierarchy, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* pItem, int iColumn) { OnHierarchyItemChanged(pItem, iColumn); });
-  connect(m_pHierarchy, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& pos) { OnHierarchyContextMenu(pos); });
+    plHybridArray<const plDocumentObject*, 8> objects;
+    for (const plUuid& guid : elements)
+    {
+      if (const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(guid))
+        objects.PushBack(pObj);
+    }
 
-  return m_pHierarchy;
+    MoveElements(objects, pNewParent, iIndex);
+  };
+  m_pHierarchyView->m_OnMessage = [this](plStringView sMessage)
+  { SetCanvasStatusMessage(sMessage); };
 }
 
-void plQtUiDocumentAssetDocumentWindow::RebuildHierarchy()
+void plUiDocumentAssetDocumentWindow::RebuildHierarchy()
 {
-  if (m_pHierarchy == nullptr)
+  if (m_pHierarchyView == nullptr)
     return;
 
-  m_bIgnoreHierarchySelection = true;
-
-  m_pHierarchy->clear();
-
-  plStringBuilder tmp;
-
-  std::function<void(const plDocumentObject*, QTreeWidgetItem*)> addChildren = [&](const plDocumentObject* pParentObj, QTreeWidgetItem* pParentItem)
-  {
-    // gather in property-index order
-    plHybridArray<const plDocumentObject*, 16> ordered;
-
-    for (const plDocumentObject* pChild : pParentObj->GetChildren())
-    {
-      if (pChild->GetParentProperty() == "Children")
-      {
-        ordered.PushBack(pChild);
-      }
-    }
-
-    ordered.Sort([](const plDocumentObject* a, const plDocumentObject* b)
-      { return a->GetPropertyIndex().ConvertTo<plInt32>() < b->GetPropertyIndex().ConvertTo<plInt32>(); });
-
-    for (const plDocumentObject* pChild : ordered)
-    {
-      plStringBuilder sLabel = plTranslate(pChild->GetType()->GetTypeName());
-
-      const plVariant name = pChild->GetTypeAccessor().GetValue("Name");
-      if (name.IsA<plString>() && !name.Get<plString>().IsEmpty())
-      {
-        sLabel.AppendFormat(": {}", name.Get<plString>());
-      }
-
-      // binding / localization badges (GetValue returns an invalid variant for absent properties)
-      bool bBound = false;
-      for (const char* szBindingProp : {"VisibleBinding", "FillAmountBinding", "TextBinding", "ClickEntryBinding"})
-      {
-        const plVariant binding = pChild->GetTypeAccessor().GetValue(szBindingProp);
-        bBound |= binding.IsA<plString>() && !binding.Get<plString>().IsEmpty();
-      }
-
-      const plVariant localized = pChild->GetTypeAccessor().GetValue("Localized");
-
-      const plVariant style = pChild->GetTypeAccessor().GetValue("Style");
-      const bool bStyled = style.IsA<plString>() && !style.Get<plString>().IsEmpty();
-
-      if (bBound)
-        sLabel.Append(" ⚡"); // lightning bolt
-      if (localized.IsA<bool>() && localized.Get<bool>())
-        sLabel.Append(" \U0001F310"); // globe
-      if (bStyled)
-        sLabel.Append(" \xF0\x9F\x8E\xA8"); // artist palette: has a UI Style
-
-      QTreeWidgetItem* pItem = new QTreeWidgetItem();
-      pItem->setText(0, sLabel.GetData());
-
-      if (bBound)
-      {
-        pItem->setToolTip(0, plMakeQString(plTranslate("GameUi.Hierarchy.BoundTooltip")));
-      }
-      pItem->setIcon(0, MakeElementTypeIcon(GetElementTypeColor(pChild->GetType())));
-      pItem->setData(0, Qt::UserRole, QString(plConversionUtils::ToString(pChild->GetGuid(), tmp).GetData()));
-
-      // eye/lock badge columns (scenegraph iconography); toggled via itemClicked
-      const plVariant visible = pChild->GetTypeAccessor().GetValue("Visible");
-      const bool bVisible = !visible.IsA<bool>() || visible.Get<bool>();
-      pItem->setIcon(1, MakeEyeIcon(bVisible));
-      pItem->setToolTip(1, plMakeQString(plTranslate("GameUi.Hierarchy.VisibleTooltip")));
-
-      // lock column: a locked element (and subtree) is not clickable in the canvas
-      const plVariant locked = pChild->GetTypeAccessor().GetValue("EditorLocked");
-      const bool bLocked = locked.IsA<bool>() && locked.Get<bool>();
-      pItem->setIcon(2, MakeHierarchyLockIcon(bLocked));
-      pItem->setToolTip(2, plMakeQString(plTranslate("GameUi.Hierarchy.LockTooltip")));
-
-      if (pParentItem != nullptr)
-      {
-        pParentItem->addChild(pItem);
-      }
-      else
-      {
-        m_pHierarchy->addTopLevelItem(pItem);
-      }
-
-      addChildren(pChild, pItem);
-    }
-  };
-
-  addChildren(GetPropertiesObject(), nullptr);
-
-  m_pHierarchy->expandAll();
-
-  m_bIgnoreHierarchySelection = false;
-
+  m_pHierarchyView->Refresh();
   SyncHierarchySelection();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnHierarchySelectionChanged()
+void plUiDocumentAssetDocumentWindow::SelectElements(plArrayPtr<const plUuid> elements)
 {
-  if (m_bIgnoreHierarchySelection)
-    return;
-
   m_bIgnoreHierarchySelection = true;
 
   plDeque<const plDocumentObject*> newSelection;
-
-  for (QTreeWidgetItem* pItem : m_pHierarchy->selectedItems())
+  for (const plUuid& guid : elements)
   {
-    const plUuid guid = plConversionUtils::ConvertStringToUuid(pItem->data(0, Qt::UserRole).toString().toUtf8().data());
-
     if (const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(guid))
-    {
       newSelection.PushBack(pObj);
-    }
   }
 
   GetDocument()->GetSelectionManager()->SetSelection(newSelection);
@@ -2375,20 +1434,14 @@ void plQtUiDocumentAssetDocumentWindow::OnHierarchySelectionChanged()
   SendSelectionToEngine();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnHierarchyItemChanged(QTreeWidgetItem* pItem, int iColumn)
+void plUiDocumentAssetDocumentWindow::ToggleElementFlag(const plDocumentObject* pObj, bool bLock)
 {
-  // clicking an eye/lock badge toggles the corresponding property (icons refresh on rebuild)
-  if (m_bIgnoreHierarchySelection || (iColumn != 1 && iColumn != 2))
-    return;
-
-  const plUuid guid = plConversionUtils::ConvertStringToUuid(pItem->data(0, Qt::UserRole).toString().toUtf8().data());
-  const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(guid);
   if (pObj == nullptr)
     return;
 
   auto pAccessor = GetDocument()->GetObjectAccessor();
 
-  if (iColumn == 1)
+  if (!bLock)
   {
     const plVariant visible = pObj->GetTypeAccessor().GetValue("Visible");
     const bool bNewVisible = !(!visible.IsA<bool>() || visible.Get<bool>());
@@ -2416,93 +1469,7 @@ void plQtUiDocumentAssetDocumentWindow::OnHierarchyItemChanged(QTreeWidgetItem* 
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnHierarchyContextMenu(const QPoint& pos)
-{
-  QMenu menu(m_pHierarchy);
-
-  QAction* pAddPanel = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddPanel")));
-  QAction* pAddStackPanel = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddStackPanel")));
-  QAction* pAddGridPanel = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddGridPanel")));
-  QAction* pAddImage = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddImage")));
-  QAction* pAddText = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddText")));
-  QAction* pAddButton = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddButton")));
-  QAction* pAddProgressBar = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddProgressBar")));
-  QAction* pAddScrollView = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddScrollView")));
-  QAction* pAddToggle = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddToggle")));
-  QAction* pAddSlider = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddSlider")));
-  QAction* pAddTextInput = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddTextInput")));
-  QAction* pAddItemList = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddItemList")));
-  QAction* pAddSubDocument = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddSubDocument")));
-  QAction* pAddSpacer = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.AddSpacer")));
-  menu.addSeparator();
-  QAction* pRemove = menu.addAction(plMakeQString(plTranslate("GameUi.Menu.Delete")));
-  pRemove->setEnabled(!m_pHierarchy->selectedItems().isEmpty());
-
-  QAction* pChosen = menu.exec(m_pHierarchy->mapToGlobal(pos));
-
-  if (pChosen == pAddPanel)
-  {
-    AddElement(plGetStaticRTTI<plUiPanel>());
-  }
-  else if (pChosen == pAddStackPanel)
-  {
-    AddElement(plGetStaticRTTI<plUiStackPanel>());
-  }
-  else if (pChosen == pAddGridPanel)
-  {
-    AddElement(plGetStaticRTTI<plUiGridPanel>());
-  }
-  else if (pChosen == pAddImage)
-  {
-    AddElement(plGetStaticRTTI<plUiImage>());
-  }
-  else if (pChosen == pAddText)
-  {
-    AddElement(plGetStaticRTTI<plUiText>());
-  }
-  else if (pChosen == pAddButton)
-  {
-    AddElement(plGetStaticRTTI<plUiButton>());
-  }
-  else if (pChosen == pAddProgressBar)
-  {
-    AddElement(plGetStaticRTTI<plUiProgressBar>());
-  }
-  else if (pChosen == pAddScrollView)
-  {
-    AddElement(plGetStaticRTTI<plUiScrollView>());
-  }
-  else if (pChosen == pAddToggle)
-  {
-    AddElement(plGetStaticRTTI<plUiToggle>());
-  }
-  else if (pChosen == pAddSlider)
-  {
-    AddElement(plGetStaticRTTI<plUiSlider>());
-  }
-  else if (pChosen == pAddTextInput)
-  {
-    AddElement(plGetStaticRTTI<plUiTextInput>());
-  }
-  else if (pChosen == pAddItemList)
-  {
-    AddElement(plGetStaticRTTI<plUiItemList>());
-  }
-  else if (pChosen == pAddSubDocument)
-  {
-    AddElement(plGetStaticRTTI<plUiSubDocument>());
-  }
-  else if (pChosen == pAddSpacer)
-  {
-    AddElement(plGetStaticRTTI<plUiSpacer>());
-  }
-  else if (pChosen == pRemove)
-  {
-    RemoveSelectedElements();
-  }
-}
-
-void plQtUiDocumentAssetDocumentWindow::AddElementAt(const plRTTI* pType, const QPoint& viewPos)
+void plUiDocumentAssetDocumentWindow::AddElementAt(const plRTTI* pType, const plVec2I32& viewPos)
 {
   const plVec2 vRefPos = WidgetToCanvasPos(viewPos);
 
@@ -2570,7 +1537,7 @@ void plQtUiDocumentAssetDocumentWindow::AddElementAt(const plRTTI* pType, const 
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::AddElement(const plRTTI* pType)
+void plUiDocumentAssetDocumentWindow::AddElement(const plRTTI* pType)
 {
   // add as child of the single selected element, or at the document root
   const plDocumentObject* pParent = GetPropertiesObject();
@@ -2604,32 +1571,8 @@ void plQtUiDocumentAssetDocumentWindow::AddElement(const plRTTI* pType)
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnHierarchyItemsMoved(const QList<QTreeWidgetItem*>& items, QTreeWidgetItem* pNewParentItem, int iIndex)
+void plUiDocumentAssetDocumentWindow::MoveElements(plArrayPtr<const plDocumentObject* const> objects, const plDocumentObject* pNewParent, int iIndex)
 {
-  const plDocumentObject* pNewParent = GetPropertiesObject();
-
-  if (pNewParentItem != nullptr)
-  {
-    const plUuid parentGuid = plConversionUtils::ConvertStringToUuid(pNewParentItem->data(0, Qt::UserRole).toString().toUtf8().data());
-    pNewParent = GetDocument()->GetObjectManager()->GetObject(parentGuid);
-
-    if (pNewParent == nullptr)
-      return;
-  }
-
-  // gather the dragged document objects
-  plHybridArray<const plDocumentObject*, 8> objects;
-
-  for (QTreeWidgetItem* pItem : items)
-  {
-    const plUuid guid = plConversionUtils::ConvertStringToUuid(pItem->data(0, Qt::UserRole).toString().toUtf8().data());
-
-    if (const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(guid))
-    {
-      objects.PushBack(pObj);
-    }
-  }
-
   if (objects.IsEmpty())
     return;
 
@@ -2671,176 +1614,224 @@ void plQtUiDocumentAssetDocumentWindow::OnHierarchyItemsMoved(const QList<QTreeW
 //////////////////////////////////////////////////////////////////////////
 // canvas toolbar / interact mode
 
-void plQtUiDocumentAssetDocumentWindow::CreateCanvasToolBar()
+void plUiDocumentAssetDocumentWindow::CreateCanvasToolBar()
 {
-  QToolBar* pToolBar = new QToolBar("Canvas", this);
-  pToolBar->setObjectName("UiDocumentAssetCanvasToolBar");
+  // its own row under the document tool bar
+  m_pCanvasToolBarView = AddRow<plUiCanvasToolBarView>({"GameUi.CanvasToolBar", "Canvas"}, plUiCanvasToolBarView::Height);
+  m_pCanvasToolBarView->m_OnChanged = [this](plUiCanvasToolBarView::Control control, plInt32 iValue)
+  { OnCanvasToolBarChanged(control, iValue); };
 
-  // device preset
-  {
-    m_pDevicePresetCombo = new QComboBox(pToolBar);
-    m_pDevicePresetCombo->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.DevicePresetTooltip")));
-    m_pDevicePresetCombo->addItem(plMakeQString(plTranslate("GameUi.Toolbar.FillViewport")), QSize(0, 0));
-    m_pDevicePresetCombo->addItem("1920 x 1080", QSize(1920, 1080));
-    m_pDevicePresetCombo->addItem("2560 x 1440", QSize(2560, 1440));
-    m_pDevicePresetCombo->addItem("3840 x 2160", QSize(3840, 2160));
-    m_pDevicePresetCombo->addItem("1280 x 800 (Deck)", QSize(1280, 800));
-    m_pDevicePresetCombo->addItem("1080 x 2340 (Phone)", QSize(1080, 2340));
-
-    connect(m_pDevicePresetCombo, &QComboBox::currentIndexChanged, this, [this](int)
-      {
-        const QSize size = m_pDevicePresetCombo->currentData().toSize();
-        m_vDeviceResolution.Set(static_cast<plUInt32>(size.width()), static_cast<plUInt32>(size.height()));
-        m_vPan.SetZero();
-        m_pZoomCombo->setEnabled(m_vDeviceResolution.x > 0);
-        RefreshCanvasView();
-      });
-
-    pToolBar->addWidget(m_pDevicePresetCombo);
-  }
-
-  // zoom
-  {
-    m_pZoomCombo = new QComboBox(pToolBar);
-    m_pZoomCombo->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.ZoomTooltip")));
-    m_pZoomCombo->addItem(plMakeQString(plTranslate("GameUi.Toolbar.ZoomFit")), 0.0f);
-    m_pZoomCombo->addItem("50 %", 0.5f);
-    m_pZoomCombo->addItem("100 %", 1.0f);
-    m_pZoomCombo->addItem("200 %", 2.0f);
-    m_pZoomCombo->setEnabled(false);
-
-    connect(m_pZoomCombo, &QComboBox::currentIndexChanged, this, [this](int)
-      {
-        m_fZoom = m_pZoomCombo->currentData().toFloat();
-        m_vPan.SetZero();
-        RefreshCanvasView();
-      });
-
-    pToolBar->addWidget(m_pZoomCombo);
-  }
-
-  // localization preview: language combo + highlight-untranslated (mockup's globe combo)
-  {
-    m_pLanguageCombo = new QComboBox(pToolBar);
-    m_pLanguageCombo->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.LanguageTooltip")));
-    PopulateLanguageCombo();
-
-    connect(m_pLanguageCombo, &QComboBox::currentIndexChanged, this, [this](int) { SendLanguageToEngine(); });
-
-    pToolBar->addWidget(m_pLanguageCombo);
-
-    m_pHighlightUntranslatedAction = pToolBar->addAction(plMakeQString(plTranslate("GameUi.Toolbar.HighlightUntranslated")));
-    m_pHighlightUntranslatedAction->setCheckable(true);
-    m_pHighlightUntranslatedAction->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.HighlightUntranslatedTooltip")));
-    connect(m_pHighlightUntranslatedAction, &QAction::toggled, this, [this](bool) { SendLanguageToEngine(); });
-  }
-
-  pToolBar->addSeparator();
-
-  // canvas tool mode: direct manipulation vs anchor editing (mockup's Select | Anchors)
-  {
-    QActionGroup* pModeGroup = new QActionGroup(this);
-
-    m_pSelectModeAction = pToolBar->addAction(plMakeQString(plTranslate("GameUi.Toolbar.SelectMode")));
-    m_pSelectModeAction->setCheckable(true);
-    m_pSelectModeAction->setChecked(true);
-    m_pSelectModeAction->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.SelectModeTooltip")));
-    pModeGroup->addAction(m_pSelectModeAction);
-
-    m_pAnchorsModeAction = pToolBar->addAction(plMakeQString(plTranslate("GameUi.Toolbar.AnchorsMode")));
-    m_pAnchorsModeAction->setCheckable(true);
-    m_pAnchorsModeAction->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.AnchorsModeTooltip")));
-    pModeGroup->addAction(m_pAnchorsModeAction);
-  }
-
-  pToolBar->addSeparator();
-
-  m_pInteractAction = pToolBar->addAction(plMakeQString(plTranslate("GameUi.Toolbar.Interact")));
-  m_pInteractAction->setCheckable(true);
-  m_pInteractAction->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.InteractTooltip")));
-  connect(m_pInteractAction, &QAction::toggled, this, [this](bool bChecked) { SetInteractMode(bChecked); });
-
-  m_pSnapAction = pToolBar->addAction(plMakeQString(plTranslate("GameUi.Toolbar.Snap")));
-  m_pSnapAction->setCheckable(true);
-  m_pSnapAction->setChecked(true);
-  m_pSnapAction->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.SnapTooltip")));
-
-  m_pSafeAreaAction = pToolBar->addAction(plMakeQString(plTranslate("GameUi.Toolbar.SafeArea")));
-  m_pSafeAreaAction->setCheckable(true);
-  m_pSafeAreaAction->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.SafeAreaTooltip")));
-  connect(m_pSafeAreaAction, &QAction::toggled, this, [this](bool) { RefreshCanvasView(); });
-
-  m_pNavGraphAction = pToolBar->addAction(plMakeQString(plTranslate("GameUi.Toolbar.NavGraph")));
-  m_pNavGraphAction->setCheckable(true);
-  m_pNavGraphAction->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.NavGraphTooltip")));
-  connect(m_pNavGraphAction, &QAction::toggled, this, [this](bool) { RefreshCanvasView(); });
-
-  m_pCheckerboardAction = pToolBar->addAction(plMakeQString(plTranslate("GameUi.Toolbar.Checker")));
-  m_pCheckerboardAction->setCheckable(true);
-  m_pCheckerboardAction->setToolTip(plMakeQString(plTranslate("GameUi.Toolbar.CheckerTooltip")));
-  connect(m_pCheckerboardAction, &QAction::toggled, this, [this](bool) { RefreshCanvasView(); });
-
-  addToolBar(pToolBar);
+  SyncCanvasToolBar();
 }
 
-void plQtUiDocumentAssetDocumentWindow::PopulateLanguageCombo()
+void plUiDocumentAssetDocumentWindow::OnCanvasToolBarChanged(plUiCanvasToolBarView::Control control, plInt32 iValue)
 {
-  if (m_pLanguageCombo == nullptr)
+  using Control = plUiCanvasToolBarView::Control;
+
+  switch (control)
+  {
+    case Control::Device:
+      SetDevicePreset(iValue);
+      break;
+
+    case Control::Zoom:
+      SetZoomPreset(iValue);
+      break;
+
+    case Control::Language:
+      // the strip: the languages, then the pseudo-localization; -1 = the authored texts
+      m_bPseudoLocalization = iValue == static_cast<plInt32>(m_Languages.GetCount());
+      m_sLanguage = (iValue >= 0 && iValue < static_cast<plInt32>(m_Languages.GetCount())) ? m_Languages[iValue] : plString();
+      UpdateLayoutContext();
+      SendLanguageToEngine();
+      break;
+
+    case Control::FitAll:
+      FitAllButtons();
+      break;
+
+    case Control::HighlightUntranslated:
+      m_bHighlightUntranslated = iValue != 0;
+      SendLanguageToEngine();
+      break;
+
+    case Control::SelectMode:
+    case Control::AnchorsMode:
+      m_bAnchorsMode = control == Control::AnchorsMode;
+      break;
+
+    case Control::Interact:
+      SetInteractMode(iValue != 0);
+      break;
+
+    case Control::Snap:
+      m_bSnap = iValue != 0;
+      break;
+
+    case Control::SafeArea:
+      m_bSafeArea = iValue != 0;
+      RefreshCanvasView();
+      break;
+
+    case Control::NavGraph:
+      m_bNavGraph = iValue != 0;
+      RefreshCanvasView();
+      break;
+
+    case Control::Checker:
+      m_bCheckerboard = iValue != 0;
+      RefreshCanvasView();
+      break;
+
+    default:
+      break;
+  }
+
+  SyncCanvasToolBar();
+}
+
+void plUiDocumentAssetDocumentWindow::SetDevicePreset(plInt32 iPreset)
+{
+  if (iPreset < 0 || iPreset >= static_cast<plInt32>(PL_ARRAY_SIZE(s_DevicePresets)))
     return;
 
-  plQtScopedBlockSignals blockSignals(m_pLanguageCombo);
+  m_iDevicePreset = iPreset;
+  m_vDeviceResolution.Set(s_DevicePresets[iPreset].m_uiWidth, s_DevicePresets[iPreset].m_uiHeight);
+  m_vPan.SetZero();
+  RefreshCanvasView();
+}
 
-  m_pLanguageCombo->clear();
-  m_pLanguageCombo->addItem(plMakeQString(plTranslate("GameUi.Toolbar.LanguageNone")), QString());
+void plUiDocumentAssetDocumentWindow::SetZoomPreset(plInt32 iPreset)
+{
+  // the entry after the presets is the zoom the mouse wheel set; it stays as it is
+  if (iPreset >= 0 && iPreset < static_cast<plInt32>(PL_ARRAY_SIZE(s_ZoomPresets)))
+    m_fZoom = s_ZoomPresets[iPreset];
 
-  // languages = subfolders of the project's game and editor localization directories
-  const QString sProjectDir = QString::fromUtf8(plToolsProject::GetSingleton()->GetProjectDirectory().GetData());
+  m_vPan.SetZero();
+  RefreshCanvasView();
+}
 
-  QStringList languages;
+void plUiDocumentAssetDocumentWindow::SyncCanvasToolBar()
+{
+  if (m_pCanvasToolBarView == nullptr)
+    return;
 
-  for (const QString& sRoot : {sProjectDir + "/Localization", sProjectDir + "/Editor/Localization"})
+  using Control = plUiCanvasToolBarView::Control;
+
+  plHybridArray<plString, 8> devices;
+  for (const DevicePreset& preset : s_DevicePresets)
+    devices.PushBack(preset.m_uiWidth == 0 ? plString(plTranslate(preset.m_szLabel)) : plString(preset.m_szLabel));
+  m_pCanvasToolBarView->SetDevice(devices, m_iDevicePreset);
+
+  // the zoom presets, and the zoom the mouse wheel set as an extra entry
+  plHybridArray<plString, 8> zooms;
+  zooms.PushBack(plTranslate("GameUi.Toolbar.ZoomFit"));
+  zooms.PushBack("50 %");
+  zooms.PushBack("100 %");
+  zooms.PushBack("200 %");
+
+  plInt32 iZoom = -1;
+  for (plUInt32 i = 0; i < PL_ARRAY_SIZE(s_ZoomPresets); ++i)
   {
-    const QDir dir(sRoot);
+    if (m_fZoom == s_ZoomPresets[i])
+      iZoom = static_cast<plInt32>(i);
+  }
 
-    for (const QString& sSub : dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name))
+  if (iZoom < 0)
+  {
+    plStringBuilder sZoom;
+    sZoom.SetFormat("{} %", static_cast<plInt32>(plMath::Round(m_fZoom * 100.0f)));
+    zooms.PushBack(sZoom);
+    iZoom = static_cast<plInt32>(zooms.GetCount()) - 1;
+  }
+
+  m_pCanvasToolBarView->SetZoom(zooms, iZoom, true);
+
+  // the language strip: the project's languages, then the pseudo-localization
+  plHybridArray<plString, 8> languages;
+  plInt32 iLanguage = -1;
+  for (plUInt32 i = 0; i < m_Languages.GetCount(); ++i)
+  {
+    languages.PushBack(GetLanguageLabel(m_Languages[i]));
+    if (!m_bPseudoLocalization && m_Languages[i] == m_sLanguage)
+      iLanguage = static_cast<plInt32>(i);
+  }
+
+  languages.PushBack(plTranslate("GameUi.Toolbar.Pseudo"));
+  if (m_bPseudoLocalization)
+    iLanguage = static_cast<plInt32>(m_Languages.GetCount());
+
+  m_pCanvasToolBarView->SetLanguage(languages, iLanguage);
+
+  m_pCanvasToolBarView->SetChecked(Control::HighlightUntranslated, m_bHighlightUntranslated);
+  m_pCanvasToolBarView->SetChecked(Control::SelectMode, !m_bAnchorsMode);
+  m_pCanvasToolBarView->SetChecked(Control::AnchorsMode, m_bAnchorsMode);
+  m_pCanvasToolBarView->SetChecked(Control::Interact, m_bInteractMode);
+  m_pCanvasToolBarView->SetChecked(Control::Snap, m_bSnap);
+  m_pCanvasToolBarView->SetChecked(Control::SafeArea, m_bSafeArea);
+  m_pCanvasToolBarView->SetChecked(Control::NavGraph, m_bNavGraph);
+  m_pCanvasToolBarView->SetChecked(Control::Checker, m_bCheckerboard);
+}
+
+void plUiDocumentAssetDocumentWindow::CollectLanguages()
+{
+  // languages = subfolders of the project's game and editor localization directories, by name
+  plGameUiLocalization::CollectLanguages(m_LanguageInfos);
+
+  m_Languages.Clear();
+  for (const plGameUiLocalization::Language& language : m_LanguageInfos)
+    m_Languages.PushBack(language.m_sName);
+}
+
+const plGameUiLocalization::Language* plUiDocumentAssetDocumentWindow::GetPreviewLanguage() const
+{
+  // the pseudo-localization stretches the English texts where the project has them
+  return plGameUiLocalization::FindLanguage(m_LanguageInfos, m_bPseudoLocalization ? plStringView("en") : m_sLanguage.GetView());
+}
+
+void plUiDocumentAssetDocumentWindow::UpdateLayoutContext()
+{
+  const plGameUiLocalization::Language* pLanguage = GetPreviewLanguage();
+  m_pPreviewTranslator = pLanguage != nullptr ? plGameUiLocalization::CreateTranslator(*pLanguage) : nullptr;
+
+  m_LayoutContext = plUiLayoutContext();
+  m_LayoutContext.m_pTranslator = m_pPreviewTranslator.Borrow();
+  m_LayoutContext.m_fPseudoExpansion = m_bPseudoLocalization ? 0.4f : 0.0f;
+}
+
+plString plUiDocumentAssetDocumentWindow::GetLanguageLabel(plStringView sLanguage) const
+{
+  const plStringView sNative = plGameUiLocalization::GetNativeName(sLanguage);
+
+  // the editor font covers Latin, Greek and Cyrillic; other scripts read in English
+  plResourceLock<plUiFontResource> pFont(plEditorUi::GetDefaultFont(), plResourceAcquireMode::BlockTillLoaded_NeverFail);
+  if (pFont.GetAcquireResult() == plResourceAcquireResult::Final)
+  {
+    for (auto it = sNative.GetIteratorFront(); it.IsValid(); ++it)
     {
-      if (!languages.contains(sSub, Qt::CaseInsensitive))
-      {
-        languages.append(sSub);
-      }
+      if (pFont->GetGlyph(it.GetCharacter()) == nullptr)
+        return plGameUiLocalization::GetEnglishName(sLanguage);
     }
   }
 
-  for (const QString& sLanguage : languages)
-  {
-    m_pLanguageCombo->addItem(QString::fromUtf8("\xF0\x9F\x8C\x90 ") + sLanguage, sLanguage);
-  }
+  return sNative;
 }
 
-void plQtUiDocumentAssetDocumentWindow::SendLanguageToEngine()
+void plUiDocumentAssetDocumentWindow::SendLanguageToEngine()
 {
   if (plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
     return;
 
-  const QString sLanguage = (m_pLanguageCombo != nullptr) ? m_pLanguageCombo->currentData().toString() : QString();
-
   plStringBuilder sFolders;
 
-  if (!sLanguage.isEmpty())
+  if (const plGameUiLocalization::Language* pLanguage = GetPreviewLanguage())
   {
-    const QString sProjectDir = QString::fromUtf8(plToolsProject::GetSingleton()->GetProjectDirectory().GetData());
-
-    for (const QString& sRoot : {sProjectDir + "/Localization/" + sLanguage, sProjectDir + "/Editor/Localization/" + sLanguage})
+    for (const plString& sFolder : pLanguage->m_Folders)
     {
-      if (QDir(sRoot).exists())
-      {
-        if (!sFolders.IsEmpty())
-        {
-          sFolders.Append(";");
-        }
+      if (!sFolders.IsEmpty())
+        sFolders.Append(";");
 
-        sFolders.Append(sRoot.toUtf8().data());
-      }
+      sFolders.Append(sFolder);
     }
   }
 
@@ -2852,9 +1843,17 @@ void plQtUiDocumentAssetDocumentWindow::SendLanguageToEngine()
   }
 
   {
+    // the strip's "Pseudo +40%"
+    plDocumentConfigMsgToEngine msg;
+    msg.m_sWhatToDo = "UiPseudo";
+    msg.m_iValue = m_bPseudoLocalization ? 40 : 0;
+    GetEditorEngineConnection()->SendMessage(&msg);
+  }
+
+  {
     plDocumentConfigMsgToEngine msg;
     msg.m_sWhatToDo = "UiHighlightUntranslated";
-    msg.m_iValue = (m_pHighlightUntranslatedAction != nullptr && m_pHighlightUntranslatedAction->isChecked()) ? 1 : 0;
+    msg.m_iValue = m_bHighlightUntranslated ? 1 : 0;
     GetEditorEngineConnection()->SendMessage(&msg);
   }
 
@@ -2862,7 +1861,7 @@ void plQtUiDocumentAssetDocumentWindow::SendLanguageToEngine()
   UpdatePreview();
 }
 
-void plQtUiDocumentAssetDocumentWindow::SendCanvasViewToEngine()
+void plUiDocumentAssetDocumentWindow::SendCanvasViewToEngine()
 {
   if (plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
     return;
@@ -2871,27 +1870,20 @@ void plQtUiDocumentAssetDocumentWindow::SendCanvasViewToEngine()
   msg.m_sWhatToDo = "UiCanvasView";
 
   plStringBuilder sValue;
-  sValue.SetFormat("{};{};{};{};{};{};{};{}", m_vDeviceResolution.x, m_vDeviceResolution.y, m_fZoom, m_vPan.x, m_vPan.y,
-    (m_pSafeAreaAction != nullptr && m_pSafeAreaAction->isChecked()) ? 1 : 0,
-    (m_pCheckerboardAction != nullptr && m_pCheckerboardAction->isChecked()) ? 1 : 0,
-    (m_pNavGraphAction != nullptr && m_pNavGraphAction->isChecked()) ? 1 : 0);
+  sValue.SetFormat("{};{};{};{};{};{};{};{}", m_vDeviceResolution.x, m_vDeviceResolution.y, m_fZoom, m_vPan.x, m_vPan.y, m_bSafeArea ? 1 : 0, m_bCheckerboard ? 1 : 0, m_bNavGraph ? 1 : 0);
   msg.m_sValue = sValue.GetData();
 
   GetEditorEngineConnection()->SendMessage(&msg);
 }
 
-void plQtUiDocumentAssetDocumentWindow::RefreshCanvasView()
+void plUiDocumentAssetDocumentWindow::RefreshCanvasView()
 {
+  // the rulers follow the transform by themselves
   SendCanvasViewToEngine();
   UpdateSelectionUi();
-
-  if (m_pHRuler != nullptr)
-    m_pHRuler->update();
-  if (m_pVRuler != nullptr)
-    m_pVRuler->update();
 }
 
-void plQtUiDocumentAssetDocumentWindow::SetInteractMode(bool bEnabled)
+void plUiDocumentAssetDocumentWindow::SetInteractMode(bool bEnabled)
 {
   if (m_bInteractMode == bEnabled)
     return;
@@ -2911,16 +1903,16 @@ void plQtUiDocumentAssetDocumentWindow::SetInteractMode(bool bEnabled)
   GetEditorEngineConnection()->SendMessage(&msg);
 }
 
-void plQtUiDocumentAssetDocumentWindow::SendInteractMouseState(const QPoint& viewPos, bool bButtonDown, float fWheelTicks /*= 0.0f*/)
+void plUiDocumentAssetDocumentWindow::SendInteractMouseState(const plVec2I32& viewPos, bool bButtonDown, float fWheelTicks /*= 0.0f*/)
 {
-  const float fWidth = static_cast<float>(m_pViewWidget->width());
-  const float fHeight = static_cast<float>(m_pViewWidget->height());
+  const float fWidth = m_pViewWidget->GetViewportSize().x;
+  const float fHeight = m_pViewWidget->GetViewportSize().y;
 
   if (fWidth <= 0.0f || fHeight <= 0.0f)
     return;
 
-  const float fX = plMath::Clamp(viewPos.x() / fWidth, 0.0f, 1.0f);
-  const float fY = plMath::Clamp(viewPos.y() / fHeight, 0.0f, 1.0f);
+  const float fX = plMath::Clamp(viewPos.x / fWidth, 0.0f, 1.0f);
+  const float fY = plMath::Clamp(viewPos.y / fHeight, 0.0f, 1.0f);
 
   m_bLastInteractButtonDown = bButtonDown;
 
@@ -2939,196 +1931,6 @@ void plQtUiDocumentAssetDocumentWindow::SendInteractMouseState(const QPoint& vie
 
 namespace
 {
-  /// Small modal dialog to create a binding: element (seeded from the selection),
-  /// property (filtered by the element's type), blackboard entry name.
-  class plQtUiAddBindingDlg : public QDialog
-  {
-  public:
-    plQtUiAddBindingDlg(QWidget* pParent, const plDynamicArray<plQtUiDocumentAssetDocumentWindow::ElementListEntry>& elements, const plUuid& preselectGuid, const QStringList& templateEntries)
-      : QDialog(pParent)
-      , m_Elements(elements)
-    {
-      setWindowTitle(plMakeQString(plTranslate("GameUi.Bindings.DlgTitle")));
-
-      QGridLayout* pGrid = new QGridLayout(this);
-
-      pGrid->addWidget(new QLabel(plMakeQString(plTranslate("GameUi.Bindings.DlgElement")), this), 0, 0);
-      m_pElementCombo = new QComboBox(this);
-      for (const auto& element : m_Elements)
-      {
-        m_pElementCombo->addItem(element.m_sLabel);
-      }
-      pGrid->addWidget(m_pElementCombo, 0, 1);
-
-      pGrid->addWidget(new QLabel(plMakeQString(plTranslate("GameUi.Bindings.DlgProperty")), this), 1, 0);
-      m_pPropertyCombo = new QComboBox(this);
-      pGrid->addWidget(m_pPropertyCombo, 1, 1);
-
-      pGrid->addWidget(new QLabel(plMakeQString(plTranslate("GameUi.Bindings.DlgEntry")), this), 2, 0);
-      m_pEntryCombo = new QComboBox(this);
-      m_pEntryCombo->setEditable(true); // template entries offered, custom names allowed
-      m_pEntryCombo->addItems(templateEntries);
-      m_pEntryCombo->setCurrentText("");
-      pGrid->addWidget(m_pEntryCombo, 2, 1);
-
-      QDialogButtonBox* pButtons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-      connect(pButtons, &QDialogButtonBox::accepted, this, [this]()
-        {
-          if (!m_pEntryCombo->currentText().isEmpty() && m_pPropertyCombo->count() > 0)
-            accept();
-        });
-      connect(pButtons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-      pGrid->addWidget(pButtons, 3, 0, 1, 2);
-
-      connect(m_pElementCombo, &QComboBox::currentIndexChanged, this, [this](int) { RepopulateProperties(); });
-
-      // preselect the given element
-      for (plUInt32 i = 0; i < m_Elements.GetCount(); ++i)
-      {
-        if (m_Elements[i].m_Guid == preselectGuid)
-        {
-          m_pElementCombo->setCurrentIndex(static_cast<int>(i));
-          break;
-        }
-      }
-
-      RepopulateProperties();
-
-      m_pEntryCombo->setFocus();
-      setMinimumWidth(340);
-    }
-
-    plUuid GetElementGuid() const
-    {
-      const int iIndex = m_pElementCombo->currentIndex();
-      return (iIndex >= 0 && iIndex < static_cast<int>(m_Elements.GetCount())) ? m_Elements[iIndex].m_Guid : plUuid();
-    }
-
-    QString GetBindingProperty() const { return m_pPropertyCombo->currentData().toString(); }
-    QString GetEntry() const { return m_pEntryCombo->currentText(); }
-
-  private:
-    void RepopulateProperties()
-    {
-      m_pPropertyCombo->clear();
-
-      const int iIndex = m_pElementCombo->currentIndex();
-      if (iIndex < 0 || iIndex >= static_cast<int>(m_Elements.GetCount()))
-        return;
-
-      plDynamicArray<plString> bindingProps;
-      plQtUiDocumentAssetDocumentWindow::GetBindablePropertiesForType(m_Elements[iIndex].m_pObject->GetType(), bindingProps);
-
-      for (const plString& sProp : bindingProps)
-      {
-        m_pPropertyCombo->addItem(plMakeQString(plTranslate(plQtUiDocumentAssetDocumentWindow::GetBindingPropertyDisplayName(sProp))), QString(sProp.GetData()));
-      }
-    }
-
-    const plDynamicArray<plQtUiDocumentAssetDocumentWindow::ElementListEntry>& m_Elements;
-    QComboBox* m_pElementCombo = nullptr;
-    QComboBox* m_pPropertyCombo = nullptr;
-    QComboBox* m_pEntryCombo = nullptr;
-  };
-
-  /// Small modal dialog to create an animation clip: name + duration. Triggers (event /
-  /// entry binding) and loop mode are edited in the property grid afterwards.
-  class plQtUiAddClipDlg : public QDialog
-  {
-  public:
-    explicit plQtUiAddClipDlg(QWidget* pParent)
-      : QDialog(pParent)
-    {
-      setWindowTitle(plMakeQString(plTranslate("GameUi.Animations.DlgClipTitle")));
-
-      QGridLayout* pGrid = new QGridLayout(this);
-
-      pGrid->addWidget(new QLabel(plMakeQString(plTranslate("GameUi.Animations.DlgName")), this), 0, 0);
-      m_pNameEdit = new QLineEdit(this);
-      pGrid->addWidget(m_pNameEdit, 0, 1);
-
-      pGrid->addWidget(new QLabel(plMakeQString(plTranslate("GameUi.Animations.DlgDuration")), this), 1, 0);
-      m_pDurationSpin = new QDoubleSpinBox(this);
-      m_pDurationSpin->setRange(0.01, 3600.0);
-      m_pDurationSpin->setDecimals(2);
-      m_pDurationSpin->setSingleStep(0.1);
-      m_pDurationSpin->setValue(0.8);
-      m_pDurationSpin->setSuffix(" s");
-      pGrid->addWidget(m_pDurationSpin, 1, 1);
-
-      QDialogButtonBox* pButtons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-      connect(pButtons, &QDialogButtonBox::accepted, this, [this]()
-        {
-          if (!m_pNameEdit->text().isEmpty())
-            accept();
-        });
-      connect(pButtons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-      pGrid->addWidget(pButtons, 2, 0, 1, 2);
-
-      m_pNameEdit->setFocus();
-      setMinimumWidth(320);
-    }
-
-    QString GetName() const { return m_pNameEdit->text(); }
-    double GetDuration() const { return m_pDurationSpin->value(); }
-
-  private:
-    QLineEdit* m_pNameEdit = nullptr;
-    QDoubleSpinBox* m_pDurationSpin = nullptr;
-  };
-
-  /// Small modal dialog to add a track to a clip: animated element (by NAME — only named
-  /// elements are offered) + target channel.
-  class plQtUiAddTrackDlg : public QDialog
-  {
-  public:
-    plQtUiAddTrackDlg(QWidget* pParent, const QStringList& elementNames, const QString& sPreselect)
-      : QDialog(pParent)
-    {
-      setWindowTitle(plMakeQString(plTranslate("GameUi.Animations.DlgTrackTitle")));
-
-      QGridLayout* pGrid = new QGridLayout(this);
-
-      pGrid->addWidget(new QLabel(plMakeQString(plTranslate("GameUi.Bindings.DlgElement")), this), 0, 0);
-      m_pElementCombo = new QComboBox(this);
-      m_pElementCombo->setEditable(true); // free names allowed (element may be named later)
-      m_pElementCombo->addItems(elementNames);
-      m_pElementCombo->setCurrentText(sPreselect);
-      pGrid->addWidget(m_pElementCombo, 0, 1);
-
-      pGrid->addWidget(new QLabel(plMakeQString(plTranslate("GameUi.Animations.DlgTarget")), this), 1, 0);
-      m_pTargetCombo = new QComboBox(this);
-      m_pTargetCombo->addItem(plMakeQString(plTranslate("plUiAnimTarget::OffsetX")), plUiAnimTarget::OffsetX);
-      m_pTargetCombo->addItem(plMakeQString(plTranslate("plUiAnimTarget::OffsetY")), plUiAnimTarget::OffsetY);
-      m_pTargetCombo->addItem(plMakeQString(plTranslate("plUiAnimTarget::Width")), plUiAnimTarget::Width);
-      m_pTargetCombo->addItem(plMakeQString(plTranslate("plUiAnimTarget::Height")), plUiAnimTarget::Height);
-      m_pTargetCombo->addItem(plMakeQString(plTranslate("plUiAnimTarget::Opacity")), plUiAnimTarget::Opacity);
-      m_pTargetCombo->addItem(plMakeQString(plTranslate("plUiAnimTarget::Scale")), plUiAnimTarget::Scale);
-      m_pTargetCombo->addItem(plMakeQString(plTranslate("plUiAnimTarget::Rotation")), plUiAnimTarget::Rotation);
-      m_pTargetCombo->addItem(plMakeQString(plTranslate("plUiAnimTarget::Tint")), plUiAnimTarget::Tint);
-      m_pTargetCombo->addItem(plMakeQString(plTranslate("plUiAnimTarget::Fill")), plUiAnimTarget::Fill);
-      pGrid->addWidget(m_pTargetCombo, 1, 1);
-
-      QDialogButtonBox* pButtons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-      connect(pButtons, &QDialogButtonBox::accepted, this, [this]()
-        {
-          if (!m_pElementCombo->currentText().isEmpty())
-            accept();
-        });
-      connect(pButtons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-      pGrid->addWidget(pButtons, 2, 0, 1, 2);
-
-      setMinimumWidth(320);
-    }
-
-    QString GetElementName() const { return m_pElementCombo->currentText(); }
-    int GetTarget() const { return m_pTargetCombo->currentData().toInt(); }
-
-  private:
-    QComboBox* m_pElementCombo = nullptr;
-    QComboBox* m_pTargetCombo = nullptr;
-  };
-
   /// default key value for a track target (the identity of that channel)
   float GetTargetDefaultValue(plInt32 iTarget)
   {
@@ -3142,9 +1944,39 @@ namespace
         return 0.0f; // offsets, size deltas, rotation
     }
   }
+
+  /// Asks for a new clip's name and duration with the engine dialog.
+  bool AskForNewClip(plString& out_sName, float& out_fDuration)
+  {
+    if (!plEngineDialog::IsEngineEnabled())
+      return false;
+
+    plUiAddClipEngineDlg dlg;
+    if (dlg.Exec() != plEngineDialog::Accepted)
+      return false;
+
+    out_sName = dlg.GetName();
+    out_fDuration = dlg.GetDuration();
+    return true;
+  }
+
+  /// Asks for a new track's element name and target with the engine dialog.
+  bool AskForNewTrack(plArrayPtr<const plString> elementNames, const plString& sPreselect, plString& out_sElement, plInt32& out_iTarget)
+  {
+    if (!plEngineDialog::IsEngineEnabled())
+      return false;
+
+    plUiAddTrackEngineDlg dlg(elementNames, sPreselect);
+    if (dlg.Exec() != plEngineDialog::Accepted)
+      return false;
+
+    out_sElement = dlg.GetElementName();
+    out_iTarget = dlg.GetTarget();
+    return true;
+  }
 } // namespace
 
-void plQtUiDocumentAssetDocumentWindow::CollectElementList(plDynamicArray<ElementListEntry>& out_elements) const
+void plUiDocumentAssetDocumentWindow::CollectElementList(plDynamicArray<ElementListEntry>& out_elements) const
 {
   out_elements.Clear();
 
@@ -3190,7 +2022,7 @@ void plQtUiDocumentAssetDocumentWindow::CollectElementList(plDynamicArray<Elemen
   collect(GetPropertiesObject());
 }
 
-void plQtUiDocumentAssetDocumentWindow::GetBindablePropertiesForType(const plRTTI* pType, plDynamicArray<plString>& out_bindingProps)
+void plUiDocumentAssetDocumentWindow::GetBindablePropertiesForType(const plRTTI* pType, plDynamicArray<plString>& out_bindingProps)
 {
   out_bindingProps.Clear();
 
@@ -3224,7 +2056,7 @@ void plQtUiDocumentAssetDocumentWindow::GetBindablePropertiesForType(const plRTT
   }
 }
 
-const char* plQtUiDocumentAssetDocumentWindow::GetBindingPropertyDisplayName(plStringView sBindingProperty)
+const char* plUiDocumentAssetDocumentWindow::GetBindingPropertyDisplayName(plStringView sBindingProperty)
 {
   if (sBindingProperty == "FillAmountBinding")
     return "FillAmount";
@@ -3244,7 +2076,7 @@ const char* plQtUiDocumentAssetDocumentWindow::GetBindingPropertyDisplayName(plS
   return "Visible";
 }
 
-void plQtUiDocumentAssetDocumentWindow::LoadTemplateEntries()
+void plUiDocumentAssetDocumentWindow::LoadTemplateEntries()
 {
   const plString& sTemplate = m_pAssetDoc->GetProperties()->m_sBlackboardTemplate;
 
@@ -3287,13 +2119,13 @@ void plQtUiDocumentAssetDocumentWindow::LoadTemplateEntries()
 
   for (const plBlackboardEntry& entry : desc.m_Entries)
   {
-    plQtUiBindingsPanel::MockEntry& mockEntry = m_TemplateEntries.ExpandAndGetRef();
+    plUiBindingsPanelBase::MockEntry& mockEntry = m_TemplateEntries.ExpandAndGetRef();
     mockEntry.m_sName = entry.m_sName.GetString();
     mockEntry.m_sValue = entry.m_InitialValue.CanConvertTo<plString>() ? entry.m_InitialValue.ConvertTo<plString>() : plString();
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnAddBindingRequested()
+void plUiDocumentAssetDocumentWindow::OnAddBindingRequested()
 {
   plDynamicArray<ElementListEntry> elements;
   CollectElementList(elements);
@@ -3312,25 +2144,46 @@ void plQtUiDocumentAssetDocumentWindow::OnAddBindingRequested()
     }
   }
 
-  QStringList templateEntries;
-  for (const auto& entry : m_TemplateEntries)
-  {
-    templateEntries.append(entry.m_sName.GetData());
-  }
-
-  plQtUiAddBindingDlg dlg(this, elements, preselectGuid, templateEntries);
-
-  if (dlg.exec() != QDialog::Accepted)
+  if (!plEngineDialog::IsEngineEnabled())
     return;
 
-  const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(dlg.GetElementGuid());
+  plDynamicArray<plUiAddBindingDialog::Element> dialogElements;
+  plDynamicArray<plString> templateEntries;
+  plInt32 iPreselect = 0;
+
+  for (plUInt32 i = 0; i < elements.GetCount(); ++i)
+  {
+    auto& element = dialogElements.ExpandAndGetRef();
+    element.m_sLabel = elements[i].m_sLabel;
+    element.m_pType = elements[i].m_pObject->GetType();
+
+    if (elements[i].m_Guid == preselectGuid)
+      iPreselect = static_cast<plInt32>(i);
+  }
+
+  for (const auto& entry : m_TemplateEntries)
+    templateEntries.PushBack(entry.m_sName);
+
+  plUiAddBindingDialog dlg(dialogElements, iPreselect, templateEntries);
+  if (dlg.Exec() != plEngineDialog::Accepted)
+    return;
+
+  const plInt32 iElement = dlg.GetElementIndex();
+  if (iElement < 0 || iElement >= static_cast<plInt32>(elements.GetCount()))
+    return;
+
+  const plUuid elementGuid = elements[iElement].m_Guid;
+  const plString sBindingProperty = dlg.GetBindingProperty();
+  const plString sEntry = dlg.GetEntry();
+
+  const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(elementGuid);
   if (pObj == nullptr)
     return;
 
   auto pAccessor = GetDocument()->GetObjectAccessor();
 
   pAccessor->StartTransaction("Add UI Binding");
-  if (pAccessor->SetValueByName(pObj, dlg.GetBindingProperty().toUtf8().data(), plString(dlg.GetEntry().toUtf8().data())).Failed())
+  if (pAccessor->SetValueByName(pObj, sBindingProperty, sEntry).Failed())
   {
     pAccessor->CancelTransaction();
     return;
@@ -3338,7 +2191,7 @@ void plQtUiDocumentAssetDocumentWindow::OnAddBindingRequested()
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnRemoveBindingRequested(const plUuid& elementGuid, const QString& sBindingProperty)
+void plUiDocumentAssetDocumentWindow::OnRemoveBindingRequested(const plUuid& elementGuid, plStringView sBindingProperty)
 {
   const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(elementGuid);
   if (pObj == nullptr)
@@ -3347,7 +2200,7 @@ void plQtUiDocumentAssetDocumentWindow::OnRemoveBindingRequested(const plUuid& e
   auto pAccessor = GetDocument()->GetObjectAccessor();
 
   pAccessor->StartTransaction("Remove UI Binding");
-  if (pAccessor->SetValueByName(pObj, sBindingProperty.toUtf8().data(), plString()).Failed())
+  if (pAccessor->SetValueByName(pObj, sBindingProperty, plString()).Failed())
   {
     pAccessor->CancelTransaction();
     return;
@@ -3355,7 +2208,7 @@ void plQtUiDocumentAssetDocumentWindow::OnRemoveBindingRequested(const plUuid& e
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnBindingEntryEdited(const plUuid& elementGuid, const QString& sBindingProperty, const QString& sNewEntry)
+void plUiDocumentAssetDocumentWindow::OnBindingEntryEdited(const plUuid& elementGuid, plStringView sBindingProperty, plStringView sNewEntry)
 {
   const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(elementGuid);
   if (pObj == nullptr)
@@ -3364,7 +2217,7 @@ void plQtUiDocumentAssetDocumentWindow::OnBindingEntryEdited(const plUuid& eleme
   auto pAccessor = GetDocument()->GetObjectAccessor();
 
   pAccessor->StartTransaction("Change UI Binding");
-  if (pAccessor->SetValueByName(pObj, sBindingProperty.toUtf8().data(), plString(sNewEntry.toUtf8().data())).Failed())
+  if (pAccessor->SetValueByName(pObj, sBindingProperty, plString(sNewEntry)).Failed())
   {
     pAccessor->CancelTransaction();
     return;
@@ -3372,7 +2225,7 @@ void plQtUiDocumentAssetDocumentWindow::OnBindingEntryEdited(const plUuid& eleme
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnBindingRowActivated(const plUuid& elementGuid)
+void plUiDocumentAssetDocumentWindow::OnBindingRowActivated(const plUuid& elementGuid)
 {
   if (const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(elementGuid))
   {
@@ -3380,7 +2233,31 @@ void plQtUiDocumentAssetDocumentWindow::OnBindingRowActivated(const plUuid& elem
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::UpdateBindingsList()
+void plUiDocumentAssetDocumentWindow::CreateBindingsPanel()
+{
+  m_pBindingsView = PL_DEFAULT_NEW(plUiBindingsView);
+  m_pBindingsPanel = m_pBindingsView.Borrow();
+  AddPanel({"Bindings", plTranslate("GameUi.Panel.Bindings")}, m_pBindingsView->CreateContent());
+
+  m_pBindingsPanel->m_OnMockDataChanged = [this]()
+  { SendMockBlackboardToEngine(); };
+  m_pBindingsPanel->m_OnAddBindingRequested = [this]()
+  { OnAddBindingRequested(); };
+  m_pBindingsPanel->m_OnRemoveBindingRequested = [this](const plUuid& guid, plStringView sProperty)
+  { OnRemoveBindingRequested(guid, sProperty); };
+  m_pBindingsPanel->m_OnBindingEntryEdited = [this](const plUuid& guid, plStringView sProperty, plStringView sEntry)
+  { OnBindingEntryEdited(guid, sProperty, sEntry); };
+  m_pBindingsPanel->m_OnBindingRowActivated = [this](const plUuid& guid)
+  { OnBindingRowActivated(guid); };
+  m_pBindingsPanel->m_OnScenarioSaveRequested = [this](plStringView sName)
+  { OnScenarioSaveRequested(sName); };
+  m_pBindingsPanel->m_OnScenarioDeleteRequested = [this](plStringView sName)
+  { OnScenarioDeleteRequested(sName); };
+  m_pBindingsPanel->m_OnScenarioSelected = [this](plStringView sName)
+  { OnScenarioSelected(sName); };
+}
+
+void plUiDocumentAssetDocumentWindow::UpdateBindingsList()
 {
   if (m_pBindingsPanel == nullptr)
     return;
@@ -3399,7 +2276,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateBindingsList()
     return sFallback;
   };
 
-  plDynamicArray<plQtUiBindingsPanel::BindingInfo> bindings;
+  plDynamicArray<plUiBindingsPanelBase::BindingInfo> bindings;
 
   plDynamicArray<ElementListEntry> elements;
   CollectElementList(elements);
@@ -3424,7 +2301,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateBindingsList()
 
     auto addBinding = [&](const char* szBindingProp, const plString& sEntry, const plString& sSeed)
     {
-      plQtUiBindingsPanel::BindingInfo& info = bindings.ExpandAndGetRef();
+      plUiBindingsPanelBase::BindingInfo& info = bindings.ExpandAndGetRef();
       info.m_ElementGuid = pObj->GetGuid();
       info.m_sElement = sElementName;
       info.m_sProperty = plTranslate(GetBindingPropertyDisplayName(szBindingProp));
@@ -3521,7 +2398,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateBindingsList()
         sProperty.AppendFormat(": {}", stateName.Get<plString>());
       }
 
-      plQtUiBindingsPanel::BindingInfo& info = bindings.ExpandAndGetRef();
+      plUiBindingsPanelBase::BindingInfo& info = bindings.ExpandAndGetRef();
       info.m_ElementGuid = pStateObj->GetGuid(); // row activation selects the state object
       info.m_sElement = sElementName;
       info.m_sProperty = sProperty;
@@ -3561,7 +2438,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateBindingsList()
     const plVariant mode = pClipObj->GetTypeAccessor().GetValue("Mode");
     const bool bValueMode = mode.CanConvertTo<plInt32>() && mode.ConvertTo<plInt32>() == plUiAnimationMode::Value;
 
-    plQtUiBindingsPanel::BindingInfo& info = bindings.ExpandAndGetRef();
+    plUiBindingsPanelBase::BindingInfo& info = bindings.ExpandAndGetRef();
     info.m_ElementGuid = pClipObj->GetGuid(); // row activation selects the clip object
     info.m_sElement = plTranslate("GameUi.Bindings.DocumentRow");
     info.m_sProperty = sProperty;
@@ -3578,7 +2455,83 @@ void plQtUiDocumentAssetDocumentWindow::UpdateBindingsList()
 //////////////////////////////////////////////////////////////////////////
 // animations panel
 
-void plQtUiDocumentAssetDocumentWindow::UpdateAnimationsList()
+void plUiDocumentAssetDocumentWindow::CreateAnimationsPanel()
+{
+  m_pAnimationsPanel = AddPanel<plUiAnimationsPanel>({"Animations", plTranslate("GameUi.Panel.Animations")});
+
+  m_pAnimationsPanel->m_OnAddClipRequested = [this]()
+  { OnAddClipRequested(); };
+  m_pAnimationsPanel->m_OnRemoveClipRequested = [this](const plUuid& guid)
+  { OnRemoveClipRequested(guid); };
+  m_pAnimationsPanel->m_OnClipActivated = [this](const plUuid& guid)
+  { OnClipActivated(guid); };
+  m_pAnimationsPanel->m_OnClipRenamed = [this](const plUuid& guid, plStringView sName)
+  { OnClipRenamed(guid, sName); };
+  m_pAnimationsPanel->m_OnClipDurationChanged = [this](const plUuid& guid, float fDuration)
+  { OnClipDurationChanged(guid, fDuration); };
+  m_pAnimationsPanel->m_OnAddTrackRequested = [this](const plUuid& guid)
+  { OnAddTrackRequested(guid); };
+  m_pAnimationsPanel->m_OnRemoveTrackRequested = [this](const plUuid& guid)
+  { OnRemoveTrackRequested(guid); };
+  m_pAnimationsPanel->m_OnAddKeyRequested = [this](const plUuid& guid, float fTime)
+  { OnAddKeyRequested(guid, fTime); };
+  m_pAnimationsPanel->m_OnRemoveKeyRequested = [this](const plUuid& guid)
+  { OnRemoveKeyRequested(guid); };
+  m_pAnimationsPanel->m_OnKeyMoved = [this](const plUuid& guid, float fTime)
+  { OnKeyMoved(guid, fTime); };
+  m_pAnimationsPanel->m_OnKeyEdited = [this](const plUiAnimationsPanel::KeyInfo& key)
+  { OnKeyEdited(key); };
+  m_pAnimationsPanel->m_OnScrubbed = [this](plStringView sName, float fTime)
+  { OnClipScrubbed(sName, fTime); };
+  m_pAnimationsPanel->m_OnPlayRequested = [this](plStringView sName)
+  { OnClipPlay(sName); };
+  m_pAnimationsPanel->m_OnStopRequested = [this]()
+  { OnClipStop(); };
+  m_pAnimationsPanel->m_OnEditsBegin = [this](plStringView sName)
+  { OnAnimationEditsBegin(sName); };
+  m_pAnimationsPanel->m_OnEditsEnd = [this](bool bCommit)
+  { OnAnimationEditsEnd(bCommit); };
+}
+
+void plUiDocumentAssetDocumentWindow::OnClipRenamed(const plUuid& clipGuid, plStringView sName)
+{
+  const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(clipGuid);
+  if (pObj == nullptr)
+    return;
+
+  auto pAccessor = GetDocument()->GetObjectAccessor();
+  pAccessor->StartTransaction("Rename UI Animation Clip");
+  pAccessor->SetValueByName(pObj, "Name", plString(sName)).IgnoreResult();
+  pAccessor->FinishTransaction();
+}
+
+void plUiDocumentAssetDocumentWindow::OnClipDurationChanged(const plUuid& clipGuid, float fDuration)
+{
+  const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(clipGuid);
+  if (pObj == nullptr)
+    return;
+
+  auto pAccessor = GetDocument()->GetObjectAccessor();
+  pAccessor->StartTransaction("Change UI Animation Clip Duration");
+  pAccessor->SetValueByName(pObj, "Duration", fDuration).IgnoreResult();
+  pAccessor->FinishTransaction();
+}
+
+void plUiDocumentAssetDocumentWindow::OnAnimationEditsBegin(plStringView sName)
+{
+  // edits of several keys, and curve drags, are one undo step: the per-key transactions nest in this one
+  GetDocument()->GetObjectAccessor()->StartTransaction(sName);
+}
+
+void plUiDocumentAssetDocumentWindow::OnAnimationEditsEnd(bool bCommit)
+{
+  if (bCommit)
+    GetDocument()->GetObjectAccessor()->FinishTransaction();
+  else
+    GetDocument()->GetObjectAccessor()->CancelTransaction();
+}
+
+void plUiDocumentAssetDocumentWindow::UpdateAnimationsList()
 {
   if (m_pAnimationsPanel == nullptr)
     return;
@@ -3615,7 +2568,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateAnimationsList()
       { return a->GetPropertyIndex().ConvertTo<plInt32>() < b->GetPropertyIndex().ConvertTo<plInt32>(); });
   };
 
-  plDynamicArray<plQtUiAnimationsPanel::ClipInfo> clips;
+  plDynamicArray<plUiAnimationsPanel::ClipInfo> clips;
 
   plHybridArray<const plDocumentObject*, 16> clipObjects, trackObjects, keyObjects;
   childrenOf(GetPropertiesObject(), "Animations", clipObjects);
@@ -3624,7 +2577,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateAnimationsList()
   {
     const auto& clip = pClipObj->GetTypeAccessor();
 
-    plQtUiAnimationsPanel::ClipInfo& info = clips.ExpandAndGetRef();
+    plUiAnimationsPanel::ClipInfo& info = clips.ExpandAndGetRef();
     info.m_Guid = pClipObj->GetGuid();
 
     const plVariant name = clip.GetValue("Name");
@@ -3650,7 +2603,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateAnimationsList()
     {
       const auto& track = pTrackObj->GetTypeAccessor();
 
-      plQtUiAnimationsPanel::TrackInfo& trackInfo = info.m_Tracks.ExpandAndGetRef();
+      plUiAnimationsPanel::TrackInfo& trackInfo = info.m_Tracks.ExpandAndGetRef();
       trackInfo.m_Guid = pTrackObj->GetGuid();
 
       const plVariant element = track.GetValue("Element");
@@ -3666,7 +2619,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateAnimationsList()
       {
         const auto& key = pKeyObj->GetTypeAccessor();
 
-        plQtUiAnimationsPanel::KeyInfo& keyInfo = trackInfo.m_Keys.ExpandAndGetRef();
+        plUiAnimationsPanel::KeyInfo& keyInfo = trackInfo.m_Keys.ExpandAndGetRef();
         keyInfo.m_Guid = pKeyObj->GetGuid();
         keyInfo.m_fTime = key.GetValue("Time").ConvertTo<float>();
         keyInfo.m_fValue = key.GetValue("Value").ConvertTo<float>();
@@ -3677,7 +2630,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateAnimationsList()
           keyInfo.m_Color = color.Get<plColor>();
       }
 
-      trackInfo.m_Keys.Sort([](const plQtUiAnimationsPanel::KeyInfo& a, const plQtUiAnimationsPanel::KeyInfo& b)
+      trackInfo.m_Keys.Sort([](const plUiAnimationsPanel::KeyInfo& a, const plUiAnimationsPanel::KeyInfo& b)
         { return a.m_fTime < b.m_fTime; });
     }
   }
@@ -3685,11 +2638,11 @@ void plQtUiDocumentAssetDocumentWindow::UpdateAnimationsList()
   m_pAnimationsPanel->SetClips(clips);
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnAddClipRequested()
+void plUiDocumentAssetDocumentWindow::OnAddClipRequested()
 {
-  plQtUiAddClipDlg dlg(this);
-
-  if (dlg.exec() != QDialog::Accepted)
+  plString sName;
+  float fDuration = 0.0f;
+  if (!AskForNewClip(sName, fDuration))
     return;
 
   const plDocumentObject* pProperties = GetPropertiesObject();
@@ -3706,8 +2659,8 @@ void plQtUiDocumentAssetDocumentWindow::OnAddClipRequested()
 
   if (const plDocumentObject* pClip = GetDocument()->GetObjectManager()->GetObject(clipGuid))
   {
-    pAccessor->SetValueByName(pClip, "Name", plString(dlg.GetName().toUtf8().data())).IgnoreResult();
-    pAccessor->SetValueByName(pClip, "Duration", static_cast<float>(dlg.GetDuration())).IgnoreResult();
+    pAccessor->SetValueByName(pClip, "Name", sName).IgnoreResult();
+    pAccessor->SetValueByName(pClip, "Duration", fDuration).IgnoreResult();
   }
 
   pAccessor->FinishTransaction();
@@ -3719,7 +2672,7 @@ void plQtUiDocumentAssetDocumentWindow::OnAddClipRequested()
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnRemoveClipRequested(const plUuid& clipGuid)
+void plUiDocumentAssetDocumentWindow::OnRemoveClipRequested(const plUuid& clipGuid)
 {
   const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(clipGuid);
   if (pObj == nullptr || pObj->GetParentProperty() != "Animations")
@@ -3736,7 +2689,7 @@ void plQtUiDocumentAssetDocumentWindow::OnRemoveClipRequested(const plUuid& clip
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnClipActivated(const plUuid& clipGuid)
+void plUiDocumentAssetDocumentWindow::OnClipActivated(const plUuid& clipGuid)
 {
   if (const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(clipGuid))
   {
@@ -3744,15 +2697,15 @@ void plQtUiDocumentAssetDocumentWindow::OnClipActivated(const plUuid& clipGuid)
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnAddTrackRequested(const plUuid& clipGuid)
+void plUiDocumentAssetDocumentWindow::OnAddTrackRequested(const plUuid& clipGuid)
 {
   const plDocumentObject* pClip = GetDocument()->GetObjectManager()->GetObject(clipGuid);
   if (pClip == nullptr)
     return;
 
   // offer the NAMED elements (tracks reference elements by name)
-  QStringList elementNames;
-  QString sPreselect;
+  plDynamicArray<plString> elementNames;
+  plString sPreselect;
   {
     plDynamicArray<ElementListEntry> elements;
     CollectElementList(elements);
@@ -3764,24 +2717,23 @@ void plQtUiDocumentAssetDocumentWindow::OnAddTrackRequested(const plUuid& clipGu
       const plVariant name = element.m_pObject->GetTypeAccessor().GetValue("Name");
       if (name.IsA<plString>() && !name.Get<plString>().IsEmpty())
       {
-        const QString sName = QString::fromUtf8(name.Get<plString>().GetData());
-        elementNames.append(sName);
+        elementNames.PushBack(name.Get<plString>());
 
         if (element.m_pObject == pSelected)
         {
-          sPreselect = sName;
+          sPreselect = name.Get<plString>();
         }
       }
     }
   }
 
-  plQtUiAddTrackDlg dlg(this, elementNames, sPreselect);
-
-  if (dlg.exec() != QDialog::Accepted)
+  plString sElement;
+  plInt32 iTarget = 0;
+  if (!AskForNewTrack(elementNames, sPreselect, sElement, iTarget))
     return;
 
   const float fDuration = pClip->GetTypeAccessor().GetValue("Duration").ConvertTo<float>();
-  const float fDefaultValue = GetTargetDefaultValue(dlg.GetTarget());
+  const float fDefaultValue = GetTargetDefaultValue(iTarget);
 
   auto pAccessor = GetDocument()->GetObjectAccessor();
 
@@ -3796,8 +2748,8 @@ void plQtUiDocumentAssetDocumentWindow::OnAddTrackRequested(const plUuid& clipGu
 
   if (const plDocumentObject* pTrack = GetDocument()->GetObjectManager()->GetObject(trackGuid))
   {
-    pAccessor->SetValueByName(pTrack, "Element", plString(dlg.GetElementName().toUtf8().data())).IgnoreResult();
-    pAccessor->SetValueByName(pTrack, "Target", dlg.GetTarget()).IgnoreResult();
+    pAccessor->SetValueByName(pTrack, "Element", sElement).IgnoreResult();
+    pAccessor->SetValueByName(pTrack, "Target", iTarget).IgnoreResult();
 
     // start with a key at both ends, so the track is immediately editable
     const float keyTimes[2] = {0.0f, plMath::Max(fDuration, 0.01f)};
@@ -3819,7 +2771,7 @@ void plQtUiDocumentAssetDocumentWindow::OnAddTrackRequested(const plUuid& clipGu
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnRemoveTrackRequested(const plUuid& trackGuid)
+void plUiDocumentAssetDocumentWindow::OnRemoveTrackRequested(const plUuid& trackGuid)
 {
   const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(trackGuid);
   if (pObj == nullptr || pObj->GetParentProperty() != "Tracks")
@@ -3836,7 +2788,7 @@ void plQtUiDocumentAssetDocumentWindow::OnRemoveTrackRequested(const plUuid& tra
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnAddKeyRequested(const plUuid& trackGuid, float fTime, bool bSelectKey)
+void plUiDocumentAssetDocumentWindow::OnAddKeyRequested(const plUuid& trackGuid, float fTime, bool bSelectKey)
 {
   const plDocumentObject* pTrack = GetDocument()->GetObjectManager()->GetObject(trackGuid);
   if (pTrack == nullptr)
@@ -3864,7 +2816,7 @@ void plQtUiDocumentAssetDocumentWindow::OnAddKeyRequested(const plUuid& trackGui
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnRemoveKeyRequested(const plUuid& keyGuid)
+void plUiDocumentAssetDocumentWindow::OnRemoveKeyRequested(const plUuid& keyGuid)
 {
   const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(keyGuid);
   if (pObj == nullptr || pObj->GetParentProperty() != "Keys")
@@ -3881,7 +2833,7 @@ void plQtUiDocumentAssetDocumentWindow::OnRemoveKeyRequested(const plUuid& keyGu
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnKeyMoved(const plUuid& keyGuid, float fNewTime)
+void plUiDocumentAssetDocumentWindow::OnKeyMoved(const plUuid& keyGuid, float fNewTime)
 {
   const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(keyGuid);
   if (pObj == nullptr)
@@ -3898,23 +2850,23 @@ void plQtUiDocumentAssetDocumentWindow::OnKeyMoved(const plUuid& keyGuid, float 
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnKeyEdited(const plUuid& keyGuid, float fTime, float fValue, const plColor& color, int iEasing)
+void plUiDocumentAssetDocumentWindow::OnKeyEdited(const plUiAnimationsPanel::KeyInfo& key)
 {
-  const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(keyGuid);
+  const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(key.m_Guid);
   if (pObj == nullptr)
     return;
 
   auto pAccessor = GetDocument()->GetObjectAccessor();
 
   pAccessor->StartTransaction("Edit UI Animation Key");
-  pAccessor->SetValueByName(pObj, "Time", fTime).IgnoreResult();
-  pAccessor->SetValueByName(pObj, "Value", fValue).IgnoreResult();
-  pAccessor->SetValueByName(pObj, "Color", color).IgnoreResult();
-  pAccessor->SetValueByName(pObj, "Easing", iEasing).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "Time", key.m_fTime).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "Value", key.m_fValue).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "Color", key.m_Color).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "Easing", key.m_iEasing).IgnoreResult();
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnClipScrubbed(const QString& sClipName, float fTime)
+void plUiDocumentAssetDocumentWindow::OnClipScrubbed(plStringView sClipName, float fTime)
 {
   if (plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
     return;
@@ -3924,25 +2876,25 @@ void plQtUiDocumentAssetDocumentWindow::OnClipScrubbed(const QString& sClipName,
 
   // time first — the clip name may contain any characters
   plStringBuilder sValue;
-  sValue.SetFormat("{};{}", fTime, sClipName.toUtf8().data());
+  sValue.SetFormat("{};{}", fTime, sClipName);
   msg.m_sValue = sValue.GetData();
 
   GetEditorEngineConnection()->SendMessage(&msg);
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnClipPlay(const QString& sClipName)
+void plUiDocumentAssetDocumentWindow::OnClipPlay(plStringView sClipName)
 {
   if (plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
     return;
 
   plDocumentConfigMsgToEngine msg;
   msg.m_sWhatToDo = "UiClipPlay";
-  msg.m_sValue = sClipName.toUtf8().data();
+  msg.m_sValue = sClipName;
 
   GetEditorEngineConnection()->SendMessage(&msg);
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnClipStop()
+void plUiDocumentAssetDocumentWindow::OnClipStop()
 {
   if (plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
     return;
@@ -3986,7 +2938,30 @@ namespace
   }
 } // namespace
 
-void plQtUiDocumentAssetDocumentWindow::UpdateStatesPanel()
+void plUiDocumentAssetDocumentWindow::CreateStatesPanel()
+{
+  m_pStatesView = PL_DEFAULT_NEW(plUiStatesView);
+  m_pStatesPanel = m_pStatesView.Borrow();
+  AddPanel({"States", plTranslate("GameUi.Panel.States")}, m_pStatesView->CreateContent());
+
+  m_pStatesPanel->m_OnDisabledBindingChanged = [this](const plUuid& guid, plStringView sValue)
+  { OnElementStringPropertyChanged(guid, "DisabledBinding", sValue); };
+  m_pStatesPanel->m_OnAddStateRequested = [this](const plUuid& guid)
+  { OnAddStateRequested(guid); };
+  m_pStatesPanel->m_OnRemoveStateRequested = [this](const plUuid& guid)
+  { OnRemoveStateRequested(guid); };
+  m_pStatesPanel->m_OnStateEdited = [this](const plUiStatesPanelBase::StateRow& state)
+  { OnStateEdited(state); };
+  m_pStatesPanel->m_OnStateStyleChanged = [this](const plUuid& guid, plStringView sStyleRef)
+  { OnElementStringPropertyChanged(guid, "Style", sStyleRef); };
+  // the same "select the object in the grid" as a clip
+  m_pStatesPanel->m_OnStateActivated = [this](const plUuid& guid)
+  { OnClipActivated(guid); };
+  m_pStatesPanel->m_OnTestValueChanged = [this](plStringView sEntry, plStringView sValue)
+  { OnMockTestValue(sEntry, sValue); };
+}
+
+void plUiDocumentAssetDocumentWindow::UpdateStatesPanel()
 {
   if (m_pStatesPanel == nullptr)
     return;
@@ -4035,7 +3010,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateStatesPanel()
 
   const auto& accessor = pSelected->GetTypeAccessor();
 
-  plQtUiStatesPanel::ElementStateInfo info;
+  plUiStatesPanelBase::ElementStateInfo info;
   info.m_ElementGuid = pSelected->GetGuid();
   info.m_bIsButton = pSelected->GetType()->IsDerivedFrom<plUiButton>();
 
@@ -4079,7 +3054,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateStatesPanel()
     {
       const auto& state = pStateObj->GetTypeAccessor();
 
-      plQtUiStatesPanel::StateRow& row = info.m_States.ExpandAndGetRef();
+      plUiStatesPanelBase::StateRow& row = info.m_States.ExpandAndGetRef();
       row.m_Guid = pStateObj->GetGuid();
 
       const plVariant name = state.GetValue("Name");
@@ -4115,7 +3090,7 @@ void plQtUiDocumentAssetDocumentWindow::UpdateStatesPanel()
   m_pStatesPanel->SetElement(&info);
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnAddStateRequested(const plUuid& elementGuid)
+void plUiDocumentAssetDocumentWindow::OnAddStateRequested(const plUuid& elementGuid)
 {
   const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(elementGuid);
   if (pObj == nullptr)
@@ -4142,7 +3117,7 @@ void plQtUiDocumentAssetDocumentWindow::OnAddStateRequested(const plUuid& elemen
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnRemoveStateRequested(const plUuid& stateGuid)
+void plUiDocumentAssetDocumentWindow::OnRemoveStateRequested(const plUuid& stateGuid)
 {
   const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(stateGuid);
   if (pObj == nullptr || pObj->GetParentProperty() != "States")
@@ -4159,26 +3134,29 @@ void plQtUiDocumentAssetDocumentWindow::OnRemoveStateRequested(const plUuid& sta
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnStateEdited(const plUuid& stateGuid, const QString& sName, const QString& sEntry, int iCondition, double fValue, const QString& sValueText, int iVisibility, const QString& sPlayClip)
+void plUiDocumentAssetDocumentWindow::OnStateEdited(const plUiStatesPanelBase::StateRow& state)
 {
-  const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(stateGuid);
+  const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(state.m_Guid);
   if (pObj == nullptr)
     return;
+
+  plStringBuilder sName(state.m_sName);
+  sName.Trim(" \t\r\n");
 
   auto pAccessor = GetDocument()->GetObjectAccessor();
 
   pAccessor->StartTransaction("Edit UI State");
-  pAccessor->SetValueByName(pObj, "Name", plString(sName.trimmed().toUtf8().data())).IgnoreResult();
-  pAccessor->SetValueByName(pObj, "Entry", plString(sEntry.toUtf8().data())).IgnoreResult();
-  pAccessor->SetValueByName(pObj, "Condition", iCondition).IgnoreResult();
-  pAccessor->SetValueByName(pObj, "Value", fValue).IgnoreResult();
-  pAccessor->SetValueByName(pObj, "ValueText", plString(sValueText.toUtf8().data())).IgnoreResult();
-  pAccessor->SetValueByName(pObj, "Visibility", iVisibility).IgnoreResult();
-  pAccessor->SetValueByName(pObj, "PlayClip", plString(sPlayClip.toUtf8().data())).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "Name", plString(sName)).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "Entry", state.m_sEntry).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "Condition", state.m_iCondition).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "Value", state.m_fValue).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "ValueText", state.m_sValueText).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "Visibility", state.m_iVisibility).IgnoreResult();
+  pAccessor->SetValueByName(pObj, "PlayClip", state.m_sPlayClip).IgnoreResult();
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnElementStringPropertyChanged(const plUuid& elementGuid, const char* szProperty, const QString& sValue)
+void plUiDocumentAssetDocumentWindow::OnElementStringPropertyChanged(const plUuid& elementGuid, const char* szProperty, plStringView sValue)
 {
   const plDocumentObject* pObj = GetDocument()->GetObjectManager()->GetObject(elementGuid);
   if (pObj == nullptr)
@@ -4187,7 +3165,7 @@ void plQtUiDocumentAssetDocumentWindow::OnElementStringPropertyChanged(const plU
   auto pAccessor = GetDocument()->GetObjectAccessor();
 
   pAccessor->StartTransaction("Edit UI Element State");
-  if (pAccessor->SetValueByName(pObj, szProperty, plString(sValue.toUtf8().data())).Failed())
+  if (pAccessor->SetValueByName(pObj, szProperty, plString(sValue)).Failed())
   {
     pAccessor->CancelTransaction();
     return;
@@ -4195,16 +3173,16 @@ void plQtUiDocumentAssetDocumentWindow::OnElementStringPropertyChanged(const plU
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnMockTestValue(const QString& sEntry, const QString& sValue)
+void plUiDocumentAssetDocumentWindow::OnMockTestValue(plStringView sEntry, plStringView sValue)
 {
   if (m_pBindingsPanel == nullptr)
     return;
 
-  m_pBindingsPanel->SetMockValueSilently(sEntry.toUtf8().data(), sValue.toUtf8().data());
+  m_pBindingsPanel->SetMockValueSilently(sEntry, sValue);
   SendMockBlackboardToEngine();
 }
 
-void plQtUiDocumentAssetDocumentWindow::ProcessMessageEventHandler(const plEditorEngineDocumentMsg* pMsg)
+void plUiDocumentAssetDocumentWindow::ProcessMessageEventHandler(const plEditorEngineDocumentMsg* pMsg)
 {
   if (auto pConfigMsg = plDynamicCast<const plSimpleDocumentConfigMsgToEditor*>(pMsg))
   {
@@ -4225,34 +3203,40 @@ void plQtUiDocumentAssetDocumentWindow::ProcessMessageEventHandler(const plEdito
       return;
     }
 
+    if (pConfigMsg->m_sWhatToDo == "UiTextFit")
+    {
+      ParseTextFit(pConfigMsg->m_sPayload);
+      UpdateTextFitPanel();
+      UpdateSizeFitPanel();
+      return;
+    }
+
     if (pConfigMsg->m_sWhatToDo == "UiDrawStats")
     {
       // m_sPayload = "batches;quads"
-      if (m_pDrawStatsLabel != nullptr)
-      {
-        plHybridArray<plStringView, 2> parts;
-        pConfigMsg->m_sPayload.GetView().Split(false, parts, ";");
+      plHybridArray<plStringView, 2> parts;
+      pConfigMsg->m_sPayload.GetView().Split(false, parts, ";");
 
-        if (parts.GetCount() == 2)
-        {
-          plStringBuilder sBatches(parts[0]), sQuads(parts[1]);
-          m_pDrawStatsLabel->setText(QString("draw: %1 batches \xC2\xB7 %2 quads").arg(sBatches.GetData(), sQuads.GetData()));
-        }
+      if (parts.GetCount() == 2)
+      {
+        plStringBuilder sBatches(parts[0]), sQuads(parts[1]);
+
+        m_pCanvasStatusRow->SetDrawStats(sBatches, sQuads);
       }
 
       return;
     }
   }
 
-  plQtEngineDocumentWindow::ProcessMessageEventHandler(pMsg);
+  plEngineDocumentWindow::ProcessMessageEventHandler(pMsg);
 }
 
-void plQtUiDocumentAssetDocumentWindow::SendMockBlackboardToEngine()
+void plUiDocumentAssetDocumentWindow::SendMockBlackboardToEngine()
 {
   if (m_pBindingsPanel == nullptr || plEditorEngineProcessConnection::GetSingleton()->IsProcessCrashed())
     return;
 
-  plDynamicArray<plQtUiBindingsPanel::MockEntry> entries;
+  plDynamicArray<plUiBindingsPanelBase::MockEntry> entries;
   m_pBindingsPanel->GetMockEntries(entries);
 
   // newline-separated name/value pairs (values may legitimately contain semicolons)
@@ -4274,28 +3258,26 @@ void plQtUiDocumentAssetDocumentWindow::SendMockBlackboardToEngine()
   GetEditorEngineConnection()->SendMessage(&msg);
 }
 
-void plQtUiDocumentAssetDocumentWindow::UpdateScenariosList()
+void plUiDocumentAssetDocumentWindow::UpdateScenariosList()
 {
   if (m_pBindingsPanel == nullptr)
     return;
 
-  QStringList names;
+  plDynamicArray<plString> names;
 
   for (const plUiMockScenario* pScenario : m_pAssetDoc->GetProperties()->m_MockScenarios)
   {
     if (pScenario != nullptr && !pScenario->m_sName.IsEmpty())
     {
-      names.append(QString::fromUtf8(pScenario->m_sName.GetData()));
+      names.PushBack(pScenario->m_sName);
     }
   }
 
   m_pBindingsPanel->SetScenarios(names);
 }
 
-const plDocumentObject* plQtUiDocumentAssetDocumentWindow::FindScenarioObject(const QString& sName) const
+const plDocumentObject* plUiDocumentAssetDocumentWindow::FindScenarioObject(plStringView sWanted) const
 {
-  const plString sWanted = sName.toUtf8().data();
-
   for (const plDocumentObject* pChild : m_pAssetDoc->GetPropertyObject()->GetChildren())
   {
     if (pChild->GetParentProperty() != "MockScenarios")
@@ -4312,13 +3294,13 @@ const plDocumentObject* plQtUiDocumentAssetDocumentWindow::FindScenarioObject(co
   return nullptr;
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnScenarioSaveRequested(const QString& sName)
+void plUiDocumentAssetDocumentWindow::OnScenarioSaveRequested(plStringView sName)
 {
   if (m_pBindingsPanel == nullptr)
     return;
 
   // snapshot the current mock table in the "UiMockBlackboard" newline format
-  plDynamicArray<plQtUiBindingsPanel::MockEntry> entries;
+  plDynamicArray<plUiBindingsPanelBase::MockEntry> entries;
   m_pBindingsPanel->GetMockEntries(entries);
 
   plStringBuilder sData;
@@ -4352,7 +3334,7 @@ void plQtUiDocumentAssetDocumentWindow::OnScenarioSaveRequested(const QString& s
     {
       const plDocumentObject* pNewObj = GetDocument()->GetObjectManager()->GetObject(newGuid);
       bOk = pNewObj != nullptr;
-      bOk = bOk && pAccessor->SetValueByName(pNewObj, "Name", plString(sName.toUtf8().data())).Succeeded();
+      bOk = bOk && pAccessor->SetValueByName(pNewObj, "Name", plString(sName)).Succeeded();
       bOk = bOk && pAccessor->SetValueByName(pNewObj, "Data", plString(sData)).Succeeded();
     }
   }
@@ -4369,7 +3351,7 @@ void plQtUiDocumentAssetDocumentWindow::OnScenarioSaveRequested(const QString& s
   UpdateScenariosList();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnScenarioDeleteRequested(const QString& sName)
+void plUiDocumentAssetDocumentWindow::OnScenarioDeleteRequested(plStringView sName)
 {
   const plDocumentObject* pScenario = FindScenarioObject(sName);
   if (pScenario == nullptr)
@@ -4390,7 +3372,7 @@ void plQtUiDocumentAssetDocumentWindow::OnScenarioDeleteRequested(const QString&
   UpdateScenariosList();
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnScenarioSelected(const QString& sName)
+void plUiDocumentAssetDocumentWindow::OnScenarioSelected(plStringView sName)
 {
   if (m_pBindingsPanel == nullptr)
     return;
@@ -4407,162 +3389,67 @@ void plQtUiDocumentAssetDocumentWindow::OnScenarioSelected(const QString& sName)
   plHybridArray<plStringView, 32> parts;
   data.Get<plString>().GetView().Split(true, parts, "\n");
 
-  plDynamicArray<plQtUiBindingsPanel::MockEntry> entries;
+  plDynamicArray<plUiBindingsPanelBase::MockEntry> entries;
 
   for (plUInt32 i = 0; i + 1 < parts.GetCount(); i += 2)
   {
-    plQtUiBindingsPanel::MockEntry& entry = entries.ExpandAndGetRef();
+    plUiBindingsPanelBase::MockEntry& entry = entries.ExpandAndGetRef();
     entry.m_sName = parts[i];
     entry.m_sValue = parts[i + 1];
   }
 
   if (parts.GetCount() % 2 == 1 && !parts.PeekBack().IsEmpty())
   {
-    plQtUiBindingsPanel::MockEntry& entry = entries.ExpandAndGetRef();
+    plUiBindingsPanelBase::MockEntry& entry = entries.ExpandAndGetRef();
     entry.m_sName = parts.PeekBack();
     entry.m_sValue = plString();
   }
 
-  // SetMockEntries emits MockDataChanged when values changed -> live preview push
+  // SetMockEntries reports MockDataChanged when values changed -> live preview push
   m_pBindingsPanel->SetMockEntries(entries);
 }
 
-void plQtUiDocumentAssetDocumentWindow::SetEngineConnectedIndicator(bool bConnected)
+void plUiDocumentAssetDocumentWindow::SetEngineConnectedIndicator(bool bConnected)
 {
-  if (m_pEngineStatusLabel == nullptr)
-    return;
-
-  if (bConnected)
-  {
-    m_pEngineStatusLabel->setStyleSheet(QStringLiteral("color: #12b886;"));
-    m_pEngineStatusLabel->setText(QString::fromUtf8("\xE2\x97\x8F ") + plMakeQString(plTranslate("GameUi.Status.EngineConnected")));
-  }
-  else
-  {
-    m_pEngineStatusLabel->setStyleSheet(QStringLiteral("color: #fa5252;"));
-    m_pEngineStatusLabel->setText(QString::fromUtf8("\xE2\x97\x8F ") + plMakeQString(plTranslate("GameUi.Status.EngineRestarting")));
-  }
+  m_pCanvasStatusRow->SetEngineState(bConnected, bConnected ? plTranslate("GameUi.Status.EngineConnected") : plTranslate("GameUi.Status.EngineRestarting"));
 }
 
-void plQtUiDocumentAssetDocumentWindow::EngineProcessEventHandler(const plEditorEngineProcessConnection::Event& e)
+void plUiDocumentAssetDocumentWindow::EngineProcessEventHandler(const plEditorEngineProcessConnection::Event& e)
 {
   if (e.m_Type == plEditorEngineProcessConnection::Event::Type::ProcessCrashed)
   {
-    QMetaObject::invokeMethod(this, [this]() { SetEngineConnectedIndicator(false); }, Qt::QueuedConnection);
+    m_Timers.Start(plTime::MakeZero(), [this]()
+      { SetEngineConnectedIndicator(false); });
   }
 
   if (e.m_Type == plEditorEngineProcessConnection::Event::Type::ProcessRestarted)
   {
     // the engine process lost all session state: re-push everything the preview needs
-    QMetaObject::invokeMethod(this, [this]()
+    m_Timers.Start(plTime::MakeZero(), [this]()
       {
         SetEngineConnectedIndicator(true);
         UpdatePreview();
         SendCanvasViewToEngine();
         SendMockBlackboardToEngine();
         SendSelectionToEngine();
-        SendLanguageToEngine();
-      },
-      Qt::QueuedConnection);
+        SendLanguageToEngine(); });
   }
 }
 
 //////////////////////////////////////////////////////////////////////////
-// rect transform panel + status bar
+// rect transform panel + status row
 
-QWidget* plQtUiDocumentAssetDocumentWindow::CreateRectTransformWidget(QWidget* pParent)
+void plUiDocumentAssetDocumentWindow::CreateRectTransformPanel()
 {
-  m_pRectTransformWidget = new QWidget(pParent);
-
-  QVBoxLayout* pOuterLayout = new QVBoxLayout(m_pRectTransformWidget);
-  pOuterLayout->setContentsMargins(4, 4, 4, 4);
-  pOuterLayout->setSpacing(4);
-
-  QHBoxLayout* pLayout = new QHBoxLayout();
-  pLayout->setContentsMargins(0, 0, 0, 0);
-  pLayout->setSpacing(8);
-  pOuterLayout->addLayout(pLayout);
-
-  // 4x4 anchor preset grid: left/center/right/stretch × top/middle/bottom/stretch
-  {
-    QGridLayout* pGrid = new QGridLayout();
-    pGrid->setSpacing(1);
-
-    for (plInt8 iRow = 0; iRow < 4; ++iRow)
-    {
-      for (plInt8 iCol = 0; iCol < 4; ++iCol)
-      {
-        QToolButton* pButton = new QToolButton(m_pRectTransformWidget);
-        pButton->setIcon(QIcon(MakeAnchorPresetPixmap(iCol, iRow)));
-        pButton->setIconSize(QSize(20, 20));
-        pButton->setAutoRaise(true);
-        pButton->setToolTip(plMakeQString(plTranslate("GameUi.AnchorPreset.Tooltip")));
-
-        connect(pButton, &QToolButton::clicked, this, [this, iCol, iRow]() { ApplyAnchorPreset(iCol, iRow); });
-
-        pGrid->addWidget(pButton, iRow, iCol);
-      }
-    }
-
-    pLayout->addLayout(pGrid);
-  }
-
-  // offset fields (labels adapt to point vs stretch anchors per axis)
-  {
-    QGridLayout* pFields = new QGridLayout();
-    pFields->setSpacing(3);
-
-    const char* defaultLabels[4] = {"X", "Y", "W", "H"};
-
-    // display order: X Y / W H (mapping to offsets x y / z w)
-    const int displayRow[4] = {0, 1, 0, 1};
-    const int displayCol[4] = {0, 0, 1, 1};
-
-    for (plUInt32 i = 0; i < 4; ++i)
-    {
-      m_pOffsetLabel[i] = new QLabel(defaultLabels[i], m_pRectTransformWidget);
-      m_pOffsetLabel[i]->setMinimumWidth(14);
-
-      m_pOffsetSpin[i] = new QDoubleSpinBox(m_pRectTransformWidget);
-      m_pOffsetSpin[i]->setRange(-100000.0, 100000.0);
-      m_pOffsetSpin[i]->setDecimals(1);
-      m_pOffsetSpin[i]->setKeyboardTracking(false);
-      m_pOffsetSpin[i]->setButtonSymbols(QAbstractSpinBox::NoButtons);
-
-      connect(m_pOffsetSpin[i], &QDoubleSpinBox::editingFinished, this, [this]() { OnOffsetEditingFinished(); });
-
-      QHBoxLayout* pPair = new QHBoxLayout();
-      pPair->setSpacing(2);
-      pPair->addWidget(m_pOffsetLabel[i]);
-      pPair->addWidget(m_pOffsetSpin[i], 1);
-
-      pFields->addLayout(pPair, displayRow[i], displayCol[i]);
-    }
-
-    pLayout->addLayout(pFields, 1);
-  }
-
-  // anchor summary ("Anchor: Left-Mid" / custom fractions), mockup's readout line
-  m_pAnchorSummaryLabel = new QLabel(m_pRectTransformWidget);
-  m_pAnchorSummaryLabel->setStyleSheet(QStringLiteral("color: #8e8e8e; font-size: 10px;"));
-  pOuterLayout->addWidget(m_pAnchorSummaryLabel);
-
-  m_pRectTransformWidget->setEnabled(false);
-
-  return m_pRectTransformWidget;
+  m_pRectTransformView = AddPanel<plUiRectTransformView>({"RectTransform", plTranslate("GameUi.Section.RectTransform")});
+  m_pRectTransformView->m_OnAnchorPreset = [this](plInt8 iCol, plInt8 iRow)
+  { ApplyAnchorPreset(iCol, iRow); };
+  m_pRectTransformView->m_OnOffsetsEdited = [this](const plVec4& vOffsets)
+  { ApplyOffsets(vOffsets); };
 }
 
-void plQtUiDocumentAssetDocumentWindow::UpdateAnchorSummary(const plUiElement* pElement)
+plString plUiDocumentAssetDocumentWindow::ComputeAnchorSummary(const plUiElement* pElement)
 {
-  if (m_pAnchorSummaryLabel == nullptr)
-    return;
-
-  if (pElement == nullptr)
-  {
-    m_pAnchorSummaryLabel->setText(QString());
-    return;
-  }
-
   const plVec2& vMin = pElement->m_vAnchorMin;
   const plVec2& vMax = pElement->m_vAnchorMax;
 
@@ -4595,37 +3482,10 @@ void plQtUiDocumentAssetDocumentWindow::UpdateAnchorSummary(const plUiElement* p
     sText.SetFormat("Anchor: custom ({}, {}) - ({}, {})", plArgF(vMin.x, 2), plArgF(vMin.y, 2), plArgF(vMax.x, 2), plArgF(vMax.y, 2));
   }
 
-  m_pAnchorSummaryLabel->setText(sText.GetData());
+  return sText;
 }
 
-QWidget* plQtUiDocumentAssetDocumentWindow::CreateEffectiveStyleWidget(QWidget* pParent)
-{
-  m_pEffectiveStyleWidget = new QWidget(pParent);
-
-  QVBoxLayout* pLayout = new QVBoxLayout(m_pEffectiveStyleWidget);
-  pLayout->setContentsMargins(4, 2, 4, 2);
-  pLayout->setSpacing(2);
-
-  m_pEffectiveStyleTitle = new QLabel(m_pEffectiveStyleWidget);
-  m_pEffectiveStyleTitle->setStyleSheet(plUiEditorTheme::szSectionHeader);
-  pLayout->addWidget(m_pEffectiveStyleTitle);
-
-  m_pEffectiveStyleTable = new QTableWidget(m_pEffectiveStyleWidget);
-  m_pEffectiveStyleTable->setStyleSheet(plUiEditorTheme::szTableStyle);
-  m_pEffectiveStyleTable->setColumnCount(3);
-  m_pEffectiveStyleTable->setHorizontalHeaderLabels({plMakeQString(plTranslate("GameUi.EffectiveStyle.ColProperty")),
-    plMakeQString(plTranslate("GameUi.EffectiveStyle.ColValue")), plMakeQString(plTranslate("GameUi.EffectiveStyle.ColSource"))});
-  m_pEffectiveStyleTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-  m_pEffectiveStyleTable->verticalHeader()->setVisible(false);
-  m_pEffectiveStyleTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  m_pEffectiveStyleTable->setSelectionMode(QAbstractItemView::NoSelection);
-  m_pEffectiveStyleTable->setFocusPolicy(Qt::NoFocus);
-  pLayout->addWidget(m_pEffectiveStyleTable, 1);
-
-  return m_pEffectiveStyleWidget;
-}
-
-bool plQtUiDocumentAssetDocumentWindow::LoadCompiledStyle(const plString& sStyleRef, plUiStyle& out_style) const
+bool plUiDocumentAssetDocumentWindow::LoadCompiledStyle(const plString& sStyleRef, plUiStyle& out_style) const
 {
   if (sStyleRef.IsEmpty())
     return false;
@@ -4663,9 +3523,9 @@ bool plQtUiDocumentAssetDocumentWindow::LoadCompiledStyle(const plString& sStyle
   return true;
 }
 
-void plQtUiDocumentAssetDocumentWindow::UpdateEffectiveStyle()
+void plUiDocumentAssetDocumentWindow::UpdateEffectiveStyle()
 {
-  if (m_pEffectiveStyleWidget == nullptr)
+  if (m_pEffectiveStyleView == nullptr)
     return;
 
   HitResult selected;
@@ -4682,18 +3542,13 @@ void plQtUiDocumentAssetDocumentWindow::UpdateEffectiveStyle()
 
   if (pObj == nullptr || (pVisual == nullptr && pText == nullptr))
   {
-    m_pEffectiveStyleTitle->setText(plMakeQString(plTranslate("GameUi.EffectiveStyle.NoSelection")));
-    m_pEffectiveStyleTable->setRowCount(0);
+    m_pEffectiveStyleView->SetEmpty();
     return;
   }
 
   plStringBuilder sName = selected.m_pElement->m_sName;
   if (sName.IsEmpty())
     sName = plTranslate(selected.m_pElement->GetDynamicRTTI()->GetTypeName());
-
-  plStringBuilder sTitle;
-  sTitle.SetFormat("{} \xC2\xB7 {}", plTranslate("GameUi.EffectiveStyle.Title"), sName);
-  m_pEffectiveStyleTitle->setText(sTitle.GetData());
 
   // ————— resolve the cascade: element locals, replaced wholesale by the style asset —————
 
@@ -4705,51 +3560,44 @@ void plQtUiDocumentAssetDocumentWindow::UpdateEffectiveStyle()
   const bool bStyleLoaded = bStyled && LoadCompiledStyle(sStyleRef, style);
   const plString sStyleName = bStyled ? GetAssetRefDisplayName(sStyleRef) : plString();
 
-  struct Row
-  {
-    QString m_sProperty;
-    QString m_sValue;
-    QColor m_Swatch;
-    bool m_bSwatch = false;
-    QString m_sSource;
-    int m_iKind = 0; // 0 element, 1 style, 2 state
-  };
+  plDynamicArray<plUiEffectiveStyleView::Row> rows;
+  using Source = plUiEffectiveStyleView::Row::Source;
 
-  QList<Row> rows;
-
-  const QString sElementSource = plMakeQString(plTranslate("GameUi.EffectiveStyle.SourceElement"));
-  const QString sStyleSource = QString("%1: %2").arg(plMakeQString(plTranslate("GameUi.EffectiveStyle.SourceStyle")), QString::fromUtf8(sStyleName.GetData()));
+  const plString sElementSource = plTranslate("GameUi.EffectiveStyle.SourceElement");
+  plStringBuilder sStyleSource;
+  sStyleSource.SetFormat("{}: {}", plTranslate("GameUi.EffectiveStyle.SourceStyle"), sStyleName);
 
   auto addColor = [&](const char* szName, const plColorGammaUB& color, bool bFromStyle)
   {
-    Row& row = rows.emplaceBack();
-    row.m_sProperty = plMakeQString(plTranslate(szName));
-    row.m_sValue = QString("#%1%2%3 · %4%%")
-                     .arg(color.r, 2, 16, QChar('0'))
-                     .arg(color.g, 2, 16, QChar('0'))
-                     .arg(color.b, 2, 16, QChar('0'))
-                     .arg(static_cast<int>(color.a / 2.55f));
-    row.m_Swatch = QColor(color.r, color.g, color.b);
-    row.m_bSwatch = true;
-    row.m_sSource = bFromStyle ? sStyleSource : sElementSource;
-    row.m_iKind = bFromStyle ? 1 : 0;
+    plUiEffectiveStyleView::Row& row = rows.ExpandAndGetRef();
+    row.m_sProperty = plTranslate(szName);
+
+    plStringBuilder sValue;
+    sValue.SetFormat("#{}{}{} \xC2\xB7 {}%", plArgU(color.r, 2, true, 16, true), plArgU(color.g, 2, true, 16, true), plArgU(color.b, 2, true, 16, true), static_cast<int>(color.a / 2.55f));
+    row.m_sValue = sValue;
+
+    row.m_Swatch = plColorGammaUB(color.r, color.g, color.b, 255);
+    row.m_sSource = bFromStyle ? plString(sStyleSource) : sElementSource;
+    row.m_Source = bFromStyle ? Source::Style : Source::Element;
   };
 
-  auto addValue = [&](const char* szName, const QString& sValue, bool bFromStyle)
+  auto addValue = [&](const char* szName, plStringView sValue, bool bFromStyle)
   {
-    Row& row = rows.emplaceBack();
-    row.m_sProperty = plMakeQString(plTranslate(szName));
+    plUiEffectiveStyleView::Row& row = rows.ExpandAndGetRef();
+    row.m_sProperty = plTranslate(szName);
     row.m_sValue = sValue;
-    row.m_sSource = bFromStyle ? sStyleSource : sElementSource;
-    row.m_iKind = bFromStyle ? 1 : 0;
+    row.m_sSource = bFromStyle ? plString(sStyleSource) : sElementSource;
+    row.m_Source = bFromStyle ? Source::Style : Source::Element;
   };
+
+  plStringBuilder sValue;
 
   if (bStyled && !bStyleLoaded)
   {
-    Row& row = rows.emplaceBack();
-    row.m_sProperty = plMakeQString(plTranslate("GameUi.EffectiveStyle.NotTransformed"));
+    plUiEffectiveStyleView::Row& row = rows.ExpandAndGetRef();
+    row.m_sProperty = plTranslate("GameUi.EffectiveStyle.NotTransformed");
     row.m_sSource = sStyleSource;
-    row.m_iKind = 1;
+    row.m_Source = Source::Style;
   }
   else if (pVisual != nullptr)
   {
@@ -4757,19 +3605,24 @@ void plQtUiDocumentAssetDocumentWindow::UpdateEffectiveStyle()
     const bool bS = bStyleLoaded;
 
     addColor("Color", bS ? style.m_Color : pVisual->m_Color, bS);
-    addValue("CornerRadius", QString("%1 / %2 / %3 / %4 px").arg(bS ? style.m_vCornerRadius.x : pVisual->m_vCornerRadius.x).arg(bS ? style.m_vCornerRadius.y : pVisual->m_vCornerRadius.y).arg(bS ? style.m_vCornerRadius.z : pVisual->m_vCornerRadius.z).arg(bS ? style.m_vCornerRadius.w : pVisual->m_vCornerRadius.w), bS);
+
+    const plVec4 vCornerRadius = bS ? style.m_vCornerRadius : pVisual->m_vCornerRadius;
+    sValue.SetFormat("{} / {} / {} / {} px", vCornerRadius.x, vCornerRadius.y, vCornerRadius.z, vCornerRadius.w);
+    addValue("CornerRadius", sValue, bS);
 
     const float fBorder = bS ? style.m_fBorderWidth : pVisual->m_fBorderWidth;
     if (fBorder > 0.0f)
     {
-      addValue("BorderWidth", QString("%1 px").arg(fBorder), bS);
+      sValue.SetFormat("{} px", fBorder);
+      addValue("BorderWidth", sValue, bS);
       addColor("BorderColor", bS ? style.m_BorderColor : pVisual->m_BorderColor, bS);
     }
 
     const float fShadow = bS ? style.m_fShadowSize : pVisual->m_fShadowSize;
     if (fShadow > 0.0f)
     {
-      addValue("ShadowSize", QString("%1 px").arg(fShadow), bS);
+      sValue.SetFormat("{} px", fShadow);
+      addValue("ShadowSize", sValue, bS);
       addColor("ShadowColor", bS ? style.m_ShadowColor : pVisual->m_ShadowColor, bS);
     }
 
@@ -4780,7 +3633,8 @@ void plQtUiDocumentAssetDocumentWindow::UpdateEffectiveStyle()
 
       if (bS)
       {
-        addValue("TransitionDuration", QString("%1 s").arg(style.m_fTransitionDuration), bS);
+        sValue.SetFormat("{} s", style.m_fTransitionDuration);
+        addValue("TransitionDuration", sValue, bS);
       }
     }
 
@@ -4797,14 +3651,16 @@ void plQtUiDocumentAssetDocumentWindow::UpdateEffectiveStyle()
     if (const plUiTextInput* pTextInput = plDynamicCast<const plUiTextInput*>(pVisual))
     {
       addColor("TextColor", bS ? style.m_TextColor : pTextInput->m_TextColor, bS);
-      addValue("FontSize", QString("%1 px").arg(bS ? style.m_uiFontSize : pTextInput->m_uiFontSize), bS);
+      sValue.SetFormat("{} px", bS ? style.m_uiFontSize : pTextInput->m_uiFontSize);
+      addValue("FontSize", sValue, bS);
     }
   }
   else if (pText != nullptr)
   {
     const bool bS = bStyleLoaded;
     addColor("TextColor", bS ? style.m_TextColor : pText->m_Color, bS);
-    addValue("FontSize", QString("%1 px").arg(bS ? style.m_uiFontSize : pText->m_uiFontSize), bS);
+    sValue.SetFormat("{} px", bS ? style.m_uiFontSize : pText->m_uiFontSize);
+    addValue("FontSize", sValue, bS);
   }
 
   // ————— state overrides (styles cross-faded on top while their condition holds) —————
@@ -4821,45 +3677,20 @@ void plQtUiDocumentAssetDocumentWindow::UpdateEffectiveStyle()
     const plVariant stateName = pStateObj->GetTypeAccessor().GetValue("Name");
     const plVariant entry = pStateObj->GetTypeAccessor().GetValue("Entry");
 
-    Row& row = rows.emplaceBack();
-    row.m_sProperty = QString("%1: %2").arg(plMakeQString(plTranslate("GameUi.EffectiveStyle.SourceState")), stateName.IsA<plString>() ? QString::fromUtf8(stateName.Get<plString>().GetData()) : QString());
-    row.m_sValue = QString::fromUtf8(GetAssetRefDisplayName(stateStyle.Get<plString>()).GetData());
-    row.m_sSource = entry.IsA<plString>() ? QString::fromUtf8(entry.Get<plString>().GetData()) : QString();
-    row.m_iKind = 2;
+    plStringBuilder sProperty;
+    sProperty.SetFormat("{}: {}", plTranslate("GameUi.EffectiveStyle.SourceState"), stateName.IsA<plString>() ? stateName.Get<plString>().GetView() : plStringView());
+
+    plUiEffectiveStyleView::Row& row = rows.ExpandAndGetRef();
+    row.m_sProperty = sProperty;
+    row.m_sValue = GetAssetRefDisplayName(stateStyle.Get<plString>());
+    row.m_sSource = entry.IsA<plString>() ? entry.Get<plString>() : plString();
+    row.m_Source = Source::State;
   }
 
-  // ————— fill the table —————
-
-  m_pEffectiveStyleTable->setRowCount(rows.size());
-
-  const QColor styleColor(0xb9, 0x96, 0xcd);  // lavender: style asset
-  const QColor stateColor(0x84, 0x5e, 0xf7);  // violet: state override
-  const QColor elementColor(0x8e, 0x8e, 0x8e); // dim: element-local
-
-  for (int i = 0; i < rows.size(); ++i)
-  {
-    const Row& row = rows[i];
-
-    QTableWidgetItem* pProperty = new QTableWidgetItem(row.m_sProperty);
-    QTableWidgetItem* pValue = new QTableWidgetItem(row.m_sValue);
-    QTableWidgetItem* pSource = new QTableWidgetItem(row.m_sSource);
-
-    if (row.m_bSwatch)
-    {
-      QPixmap swatch(12, 12);
-      swatch.fill(row.m_Swatch);
-      pValue->setIcon(QIcon(swatch));
-    }
-
-    pSource->setForeground(QBrush(row.m_iKind == 1 ? styleColor : (row.m_iKind == 2 ? stateColor : elementColor)));
-
-    m_pEffectiveStyleTable->setItem(i, 0, pProperty);
-    m_pEffectiveStyleTable->setItem(i, 1, pValue);
-    m_pEffectiveStyleTable->setItem(i, 2, pSource);
-  }
+  m_pEffectiveStyleView->SetRows(sName, rows);
 }
 
-void plQtUiDocumentAssetDocumentWindow::ApplyAnchorPreset(plInt8 iCol, plInt8 iRow)
+void plUiDocumentAssetDocumentWindow::ApplyAnchorPreset(plInt8 iCol, plInt8 iRow)
 {
   HitResult selected;
   if (!GetSelectedElementRect(selected))
@@ -4928,11 +3759,8 @@ void plQtUiDocumentAssetDocumentWindow::ApplyAnchorPreset(plInt8 iCol, plInt8 iR
   }
 }
 
-void plQtUiDocumentAssetDocumentWindow::OnOffsetEditingFinished()
+void plUiDocumentAssetDocumentWindow::ApplyOffsets(const plVec4& vOffsets)
 {
-  if (m_bIgnoreRectPanelChanges)
-    return;
-
   HitResult selected;
   if (!GetSelectedElementRect(selected))
     return;
@@ -4940,12 +3768,6 @@ void plQtUiDocumentAssetDocumentWindow::OnOffsetEditingFinished()
   const plDocumentObject* pObj = GetElementDocObject(selected.m_Path);
   if (pObj == nullptr)
     return;
-
-  const plVec4 vOffsets(
-    static_cast<float>(m_pOffsetSpin[0]->value()),
-    static_cast<float>(m_pOffsetSpin[1]->value()),
-    static_cast<float>(m_pOffsetSpin[2]->value()),
-    static_cast<float>(m_pOffsetSpin[3]->value()));
 
   if (vOffsets == selected.m_pElement->m_vOffsets)
     return;
@@ -4961,64 +3783,56 @@ void plQtUiDocumentAssetDocumentWindow::OnOffsetEditingFinished()
   pAccessor->FinishTransaction();
 }
 
-void plQtUiDocumentAssetDocumentWindow::UpdateSelectionUi()
+void plUiDocumentAssetDocumentWindow::UpdateSelectionUi()
 {
   HitResult selected;
   const bool bHasElement = GetSelectedElementRect(selected);
 
-  if (m_pRectTransformWidget != nullptr)
+  if (m_pRectTransformView != nullptr)
   {
-    m_pRectTransformWidget->setEnabled(bHasElement);
+    plUiRectTransformView::State state;
+    state.m_bHasElement = bHasElement;
 
     if (bHasElement)
     {
-      m_bIgnoreRectPanelChanges = true;
-
-      const plUiElement* pElement = selected.m_pElement;
-
-      const bool bPointX = pElement->m_vAnchorMin.x == pElement->m_vAnchorMax.x;
-      const bool bPointY = pElement->m_vAnchorMin.y == pElement->m_vAnchorMax.y;
-
-      m_pOffsetLabel[0]->setText(bPointX ? "X" : "L");
-      m_pOffsetLabel[2]->setText(bPointX ? "W" : "R");
-      m_pOffsetLabel[1]->setText(bPointY ? "Y" : "T");
-      m_pOffsetLabel[3]->setText(bPointY ? "H" : "B");
-
-      m_pOffsetSpin[0]->setValue(pElement->m_vOffsets.x);
-      m_pOffsetSpin[1]->setValue(pElement->m_vOffsets.y);
-      m_pOffsetSpin[2]->setValue(pElement->m_vOffsets.z);
-      m_pOffsetSpin[3]->setValue(pElement->m_vOffsets.w);
-
-      m_bIgnoreRectPanelChanges = false;
+      state.m_bInContainer = IsContainerParent(m_pAssetDoc->GetProperties(), selected.m_Path);
+      state.m_vAnchorMin = selected.m_pElement->m_vAnchorMin;
+      state.m_vAnchorMax = selected.m_pElement->m_vAnchorMax;
+      state.m_vOffsets = selected.m_pElement->m_vOffsets;
+      state.m_sSummary = ComputeAnchorSummary(selected.m_pElement);
     }
 
-    UpdateAnchorSummary(bHasElement ? selected.m_pElement : nullptr);
+    m_pRectTransformView->SetState(state);
+  }
+
+  if (bHasElement)
+  {
+    plStringBuilder sName = selected.m_pElement->m_sName;
+    if (sName.IsEmpty())
+      sName = "<unnamed>";
+
+    plStringBuilder sElement, sPosition, sSize;
+    sElement.SetFormat("{} ({})", sName, plTranslate(selected.m_pElement->GetDynamicRTTI()->GetTypeName()));
+    sPosition.SetFormat("{}, {}", plArgF(selected.m_Rect.x, 0), plArgF(selected.m_Rect.y, 0));
+    sSize.SetFormat("{} \xC3\x97 {}", plArgF(selected.m_Rect.width, 0), plArgF(selected.m_Rect.height, 0));
+    m_pCanvasStatusRow->SetSelection(sElement, sPosition, sSize);
+  }
+  else
+  {
+    m_pCanvasStatusRow->SetSelection({}, {}, {});
   }
 
   UpdateEffectiveStyle();
-
-  if (m_pStatusLabel != nullptr)
-  {
-    if (bHasElement)
-    {
-      plStringBuilder sName = selected.m_pElement->m_sName;
-      if (sName.IsEmpty())
-        sName = "<unnamed>";
-
-      plStringBuilder sStatus;
-      sStatus.SetFormat("{} ({}) — rect {}, {} · {} × {} px", sName, plTranslate(selected.m_pElement->GetDynamicRTTI()->GetTypeName()),
-        plArgF(selected.m_Rect.x, 0), plArgF(selected.m_Rect.y, 0), plArgF(selected.m_Rect.width, 0), plArgF(selected.m_Rect.height, 0));
-
-      m_pStatusLabel->setText(sStatus.GetData());
-    }
-    else
-    {
-      m_pStatusLabel->setText("");
-    }
-  }
+  UpdateSizeFitPanel();
+  UpdateTextFitPanel();
 }
 
-void plQtUiDocumentAssetDocumentWindow::RemoveSelectedElements()
+void plUiDocumentAssetDocumentWindow::SetCanvasStatusMessage(plStringView sMessage)
+{
+  m_pCanvasStatusRow->SetMessage(sMessage);
+}
+
+void plUiDocumentAssetDocumentWindow::RemoveSelectedElements()
 {
   plHybridArray<plUuid, 8> toRemove;
 

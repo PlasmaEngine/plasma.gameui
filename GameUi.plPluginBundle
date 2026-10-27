@@ -8,8 +8,8 @@ PluginInfo
 	// Artwork existed on disk but the bundle had no fields for it, so nothing displayed it.
 	string %Icon{"GameUiIcon.png"}
 	string %Banner{"GameUiBanner.png"}
-	string %MinEngineVersion{"0.7.0"}
-	string %MaxEngineVersion{"0.7.0"}
+	string %MinEngineVersion{"0.11.2"}
+	string %MaxEngineVersion{"0.11.2"}
 	string %Description{"Engine-native game UI framework: UI Document assets, widget tree, batched 2D renderer and canvas components."}
 	string %EditorPlugins{"plEditorPluginGameUi"}
 	string %EditorEnginePlugins{"plEnginePluginGameUi"}

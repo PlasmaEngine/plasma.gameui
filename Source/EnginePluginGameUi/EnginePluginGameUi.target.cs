@@ -12,7 +12,6 @@ public class EnginePluginGameUiTarget : TargetRules
         UseUnityBuild = true;
         UseAdaptiveUnityBuild = true;
         UseIncrementalLinking = true;
-        TargetDependencies.Add("GameUiPlugin");
         ExtraModules.Add("EnginePluginGameUiModule");
     }
 }

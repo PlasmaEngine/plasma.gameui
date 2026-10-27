@@ -43,6 +43,7 @@ private:
   plMap<plString, plString> m_FontGuids;    ///< source font path -> UI Font asset guid
 };
 
-/// \brief Shows the import report dialog (modal) when the report contains warnings or
-/// errors, and mirrors all entries to plLog. Safe to call without a QApplication (logs only).
+/// \brief Shows the import report dialog (modal, drawn by the engine) when the report contains
+/// warnings or errors, and mirrors all entries to plLog. Without the editor UI renderer it only
+/// logs.
 void plUiImportShowReport(const plUiImportReport& report, plStringView sTitle);

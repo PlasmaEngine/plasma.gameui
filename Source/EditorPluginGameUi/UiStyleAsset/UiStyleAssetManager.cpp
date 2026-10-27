@@ -2,7 +2,7 @@
 
 #include <EditorPluginGameUi/UiStyleAsset/UiStyleAsset.h>
 #include <EditorPluginGameUi/UiStyleAsset/UiStyleAssetManager.h>
-#include <EditorPluginGameUi/UiStyleAsset/UiStyleAssetWindow.moc.h>
+#include <EditorPluginGameUi/UiStyleAsset/UiStyleAssetWindow.h>
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plUiStyleAssetDocumentManager, 1, plRTTIDefaultAllocator<plUiStyleAssetDocumentManager>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -36,7 +36,7 @@ void plUiStyleAssetDocumentManager::OnDocumentManagerEvent(const plDocumentManag
     {
       if (e.m_pDocument->GetDynamicRTTI() == plGetStaticRTTI<plUiStyleAssetDocument>())
       {
-        new plQtUiStyleAssetDocumentWindow(static_cast<plUiStyleAssetDocument*>(e.m_pDocument)); // NOLINT: Not a memory leak
+        new plUiStyleAssetDocumentWindow(static_cast<plUiStyleAssetDocument*>(e.m_pDocument)); // NOLINT: Not a memory leak
       }
     }
     break;

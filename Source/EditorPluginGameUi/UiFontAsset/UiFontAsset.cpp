@@ -1,5 +1,8 @@
 #include <EditorPluginGameUi/EditorPluginGameUiPCH.h>
 
+#include <EditorFramework/Assets/AssetCurator.h>
+#include <EditorFramework/EditorApp/EditorApp.h>
+#include <EditorPluginGameUi/UiDocumentAsset/UiLocalization.h>
 #include <EditorPluginGameUi/UiFontAsset/UiFontAsset.h>
 #include <Foundation/IO/FileSystem/FileReader.h>
 #include <GameUiPlugin/Resources/UiFontResource.h>
@@ -56,6 +59,16 @@ namespace
       unique.Insert(it.GetCharacter());
     }
 
+    // the characters the translations use, in every language of the project
+    if (pProp->m_bStringTableCharacters)
+    {
+      plDynamicArray<plGameUiLocalization::Language> languages;
+      plGameUiLocalization::CollectLanguages(languages);
+
+      for (const plGameUiLocalization::Language& language : languages)
+        plGameUiLocalization::CollectCharacters(language, unique);
+    }
+
     for (plUInt32 cp : unique)
     {
       out_codepoints.PushBack(cp);
@@ -64,24 +77,83 @@ namespace
     out_codepoints.Sort();
   }
 
+  constexpr FT_Int s_iSdfSpread = 16;
+
+  /// One font file loaded into FreeType at the base size; the bytes stay alive with the face.
+  struct BakeFace
+  {
+    plString m_sFile;
+    plDynamicArray<plUInt8> m_Data;
+    FT_Face m_Face = nullptr;
+  };
+
+  plStatus LoadFace(FT_Library ftLibrary, plStringView sFile, plUInt32 uiBaseSize, BakeFace& out_face)
+  {
+    out_face.m_sFile = sFile;
+
+    plFileReader reader;
+    if (reader.Open(sFile).Failed())
+      return plStatus(plFmt("Failed to open font file '{}'", sFile));
+
+    out_face.m_Data.SetCountUninitialized(static_cast<plUInt32>(reader.GetFileSize()));
+    reader.ReadBytes(out_face.m_Data.GetData(), out_face.m_Data.GetCount());
+
+    // a collection (.ttc) bakes its first face
+    if (FT_New_Memory_Face(ftLibrary, out_face.m_Data.GetData(), out_face.m_Data.GetCount(), 0, &out_face.m_Face) != 0)
+      return plStatus(plFmt("Failed to load font face from '{}'", sFile));
+
+    if (FT_Set_Pixel_Sizes(out_face.m_Face, 0, uiBaseSize) != 0)
+      return plStatus(plFmt("Failed to set the pixel size of '{}'", sFile));
+
+    return plStatus(PL_SUCCESS);
+  }
+
+  /// The first face with a glyph for the character: the font file, then the fallbacks in order. nullptr when none has
+  /// one.
+  BakeFace* FindFaceWithGlyph(plDeque<BakeFace>& ref_faces, plUInt32 uiCodepoint, plUInt32& out_uiGlyphIndex)
+  {
+    for (BakeFace& face : ref_faces)
+    {
+      out_uiGlyphIndex = FT_Get_Char_Index(face.m_Face, uiCodepoint);
+      if (out_uiGlyphIndex != 0)
+        return &face;
+    }
+
+    return nullptr;
+  }
+
+  /// Kerning pairs between glyphs of the same face; a pair across faces has no kerning.
+  void CollectKerning(const plDeque<plUiFontBakeGlyph>& glyphs, const plDynamicArray<const BakeFace*>& glyphFaces, plUiFontResourceDescriptor& out_desc)
+  {
+    for (plUInt32 i = 0; i < glyphs.GetCount(); ++i)
+    {
+      const FT_Face face = glyphFaces[i]->m_Face;
+      if (!FT_HAS_KERNING(face))
+        continue;
+
+      for (plUInt32 j = 0; j < glyphs.GetCount(); ++j)
+      {
+        if (glyphFaces[j] != glyphFaces[i])
+          continue;
+
+        FT_Vector kerning;
+        if (FT_Get_Kerning(face, glyphs[i].m_uiGlyphIndex, glyphs[j].m_uiGlyphIndex, FT_KERNING_DEFAULT, &kerning) != 0)
+          continue;
+
+        if (kerning.x != 0)
+        {
+          const plUInt64 uiKey = (static_cast<plUInt64>(glyphs[i].m_uiCodepoint) << 32) | glyphs[j].m_uiCodepoint;
+          out_desc.m_Kerning.Insert(uiKey, kerning.x / 64.0f);
+        }
+      }
+    }
+  }
+
   plStatus BakeFont(const plUiFontAssetProperties* pProp, plUiFontResourceDescriptor& out_desc)
   {
     if (pProp->m_sFontFile.IsEmpty())
     {
       return plStatus("No font file specified");
-    }
-
-    // read the font file into memory
-    plDynamicArray<plUInt8> fontData;
-    {
-      plFileReader reader;
-      if (reader.Open(pProp->m_sFontFile).Failed())
-      {
-        return plStatus(plFmt("Failed to open font file '{}'", pProp->m_sFontFile));
-      }
-
-      fontData.SetCountUninitialized(static_cast<plUInt32>(reader.GetFileSize()));
-      reader.ReadBytes(fontData.GetData(), fontData.GetCount());
     }
 
     FT_Library ftLibrary = nullptr;
@@ -96,27 +168,39 @@ namespace
     // sampling reconstruct the glyph contour smoothly under strong magnification —
     // the narrow default band shows lumpy 'stair' edges when text is scaled up
     {
-      FT_Int iSpread = 16;
+      FT_Int iSpread = s_iSdfSpread;
       FT_Property_Set(ftLibrary, "sdf", "spread", &iSpread); // best effort: older modules ignore it
     }
 
-    FT_Face face = nullptr;
-    if (FT_New_Memory_Face(ftLibrary, fontData.GetData(), fontData.GetCount(), 0, &face) != 0)
+    // the font file first, then the fallbacks; the faces are released before the library
+    plDeque<BakeFace> faces;
+    PL_SCOPE_EXIT(for (BakeFace& face : faces) { if (face.m_Face != nullptr) FT_Done_Face(face.m_Face); });
+
+    PL_SUCCEED_OR_RETURN(LoadFace(ftLibrary, pProp->m_sFontFile, pProp->m_uiBaseSize, faces.ExpandAndGetRef()));
+
+    for (const plString& sFallback : pProp->m_FallbackFonts)
     {
-      return plStatus(plFmt("Failed to load font face from '{}'", pProp->m_sFontFile));
+      if (sFallback.IsEmpty())
+        continue;
+
+      // loaded in place: the face points into its bytes, which must not move
+      const plStatus status = LoadFace(ftLibrary, sFallback, pProp->m_uiBaseSize, faces.ExpandAndGetRef());
+      if (status.Failed())
+      {
+        plLog::Warning("UI font fallback skipped: {}", status.m_sMessage);
+        if (faces.PeekBack().m_Face != nullptr)
+          FT_Done_Face(faces.PeekBack().m_Face);
+        faces.PopBack();
+      }
     }
 
-    PL_SCOPE_EXIT(FT_Done_Face(face));
-
-    if (FT_Set_Pixel_Sizes(face, 0, pProp->m_uiBaseSize) != 0)
-    {
-      return plStatus("Failed to set font pixel size");
-    }
-
+    // the line metrics come from the font file
+    const FT_Face face = faces[0].m_Face;
     out_desc.m_fBaseSize = static_cast<float>(pProp->m_uiBaseSize);
     out_desc.m_fAscent = face->size->metrics.ascender / 64.0f;
     out_desc.m_fDescent = face->size->metrics.descender / 64.0f;
     out_desc.m_fLineGap = (face->size->metrics.height / 64.0f) - (out_desc.m_fAscent - out_desc.m_fDescent);
+    out_desc.m_fSdfSpread = static_cast<float>(s_iSdfSpread);
 
     plDynamicArray<plUInt32> codepoints;
     CollectCodepoints(pProp, codepoints);
@@ -128,33 +212,43 @@ namespace
 
     // render all glyphs to SDF bitmaps
     plDeque<plUiFontBakeGlyph> glyphs;
+    plDynamicArray<const BakeFace*> glyphFaces;
     bool bSdfUnsupported = false;
+    plUInt32 uiMissing = 0;
 
     for (plUInt32 cp : codepoints)
     {
-      const plUInt32 uiGlyphIndex = FT_Get_Char_Index(face, cp);
-      if (uiGlyphIndex == 0)
-        continue; // not present in this font
+      plUInt32 uiGlyphIndex = 0;
+      BakeFace* pFace = FindFaceWithGlyph(faces, cp, uiGlyphIndex);
+      if (pFace == nullptr)
+      {
+        // not present in the font nor its fallbacks
+        if (cp > 32)
+          ++uiMissing;
+        continue;
+      }
 
-      if (FT_Load_Glyph(face, uiGlyphIndex, FT_LOAD_DEFAULT) != 0)
+      const FT_Face glyphFace = pFace->m_Face;
+      if (FT_Load_Glyph(glyphFace, uiGlyphIndex, FT_LOAD_DEFAULT) != 0)
         continue;
 
-      if (FT_Render_Glyph(face->glyph, FT_RENDER_MODE_SDF) != 0)
+      if (FT_Render_Glyph(glyphFace->glyph, FT_RENDER_MODE_SDF) != 0)
       {
         // fall back to a regular AA bitmap; text stays readable but won't scale as crisply
         bSdfUnsupported = true;
 
-        if (FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL) != 0)
+        if (FT_Render_Glyph(glyphFace->glyph, FT_RENDER_MODE_NORMAL) != 0)
           continue;
       }
 
-      const FT_Bitmap& bitmap = face->glyph->bitmap;
+      const FT_Bitmap& bitmap = glyphFace->glyph->bitmap;
 
+      glyphFaces.PushBack(pFace);
       plUiFontBakeGlyph& glyph = glyphs.ExpandAndGetRef();
       glyph.m_uiCodepoint = cp;
       glyph.m_uiGlyphIndex = uiGlyphIndex;
-      glyph.m_vBearing.Set(static_cast<float>(face->glyph->bitmap_left), static_cast<float>(face->glyph->bitmap_top));
-      glyph.m_fAdvance = face->glyph->advance.x / 64.0f;
+      glyph.m_vBearing.Set(static_cast<float>(glyphFace->glyph->bitmap_left), static_cast<float>(glyphFace->glyph->bitmap_top));
+      glyph.m_fAdvance = glyphFace->glyph->advance.x / 64.0f;
       glyph.m_uiWidth = bitmap.width;
       glyph.m_uiHeight = bitmap.rows;
 
@@ -177,6 +271,11 @@ namespace
     if (glyphs.IsEmpty())
     {
       return plStatus("The font contains none of the selected characters");
+    }
+
+    if (uiMissing > 0)
+    {
+      plLog::Warning("{} of the selected characters are in neither '{}' nor its fallback fonts; they draw as boxes.", uiMissing, pProp->m_sFontFile);
     }
 
     // pack the glyph bitmaps into an atlas (2 px padding against bilinear bleed)
@@ -230,25 +329,7 @@ namespace
       glyph.m_fAdvance = baked.m_fAdvance;
     }
 
-    // kerning pairs
-    if (FT_HAS_KERNING(face))
-    {
-      for (const plUiFontBakeGlyph& first : glyphs)
-      {
-        for (const plUiFontBakeGlyph& second : glyphs)
-        {
-          FT_Vector kerning;
-          if (FT_Get_Kerning(face, first.m_uiGlyphIndex, second.m_uiGlyphIndex, FT_KERNING_DEFAULT, &kerning) != 0)
-            continue;
-
-          if (kerning.x != 0)
-          {
-            const plUInt64 uiKey = (static_cast<plUInt64>(first.m_uiCodepoint) << 32) | second.m_uiCodepoint;
-            out_desc.m_Kerning.Insert(uiKey, kerning.x / 64.0f);
-          }
-        }
-      }
-    }
+    CollectKerning(glyphs, glyphFaces, out_desc);
 
     return plStatus(PL_SUCCESS);
   }
@@ -280,4 +361,92 @@ void plUiFontAssetDocument::UpdateAssetDocumentInfo(plAssetDocumentInfo* pInfo) 
   {
     pInfo->m_TransformDependencies.Insert(pProp->m_sFontFile);
   }
+
+  for (const plString& sFallback : pProp->m_FallbackFonts)
+  {
+    if (!sFallback.IsEmpty())
+      pInfo->m_TransformDependencies.Insert(sFallback);
+  }
+
+  // an edited translation rebakes the fonts that take the string tables' characters
+  if (pProp->m_bStringTableCharacters)
+    plGameUiLocalization::AddTableDependencies(pInfo->m_TransformDependencies);
+}
+
+namespace
+{
+  /// The characters of the set the text does not contain yet, in codepoint order.
+  plString GetNewCharacters(plStringView sExisting, const plHashSet<plUInt32>& characters)
+  {
+    plHashSet<plUInt32> existing;
+    for (auto it = sExisting.GetIteratorFront(); it.IsValid(); ++it)
+      existing.Insert(it.GetCharacter());
+
+    plDynamicArray<plUInt32> added;
+    for (plUInt32 uiCp : characters)
+    {
+      // spaces and control characters never need a glyph
+      if (uiCp > 32 && !existing.Contains(uiCp))
+        added.PushBack(uiCp);
+    }
+
+    added.Sort();
+
+    plStringBuilder sAdded;
+    for (plUInt32 uiCp : added)
+      sAdded.Append(uiCp);
+
+    return sAdded;
+  }
+} // namespace
+
+plStatus plUiFontAssetDocument::AddCustomCharacters(plStringView sFontResource, const plHashSet<plUInt32>& characters, plUInt32& out_uiAdded)
+{
+  out_uiAdded = 0;
+
+  if (!plConversionUtils::IsStringUuid(sFontResource))
+    return plStatus("The text uses no UI Font asset.");
+
+  const plUuid fontGuid = plConversionUtils::ConvertStringToUuid(sFontResource);
+  auto pSubAsset = plAssetCurator::GetSingleton()->GetSubAsset(fontGuid);
+  if (!pSubAsset.isValid())
+    return plStatus("The UI Font asset was not found.");
+
+  const plString sPath = pSubAsset->m_pAssetInfo->m_Path.GetAbsolutePath();
+  const bool bWasOpen = plDocumentManager::GetDocumentByGuid(fontGuid) != nullptr;
+
+  plDocument* pDoc = plEditorApp::GetSingleton()->OpenDocument(sPath, plDocumentFlags::None);
+  plUiFontAssetDocument* pFontDoc = plDynamicCast<plUiFontAssetDocument*>(pDoc);
+  if (pFontDoc == nullptr)
+    return plStatus(plFmt("'{}' could not be opened.", sPath));
+
+  const plString sAdded = GetNewCharacters(pFontDoc->GetProperties()->m_sCustomCharacters, characters);
+  out_uiAdded = sAdded.GetCharacterCount();
+
+  plStatus result(PL_SUCCESS);
+  if (out_uiAdded > 0)
+  {
+    plStringBuilder sCharacters = pFontDoc->GetProperties()->m_sCustomCharacters;
+    sCharacters.Append(sAdded);
+
+    plObjectAccessorBase* pAccessor = pFontDoc->GetObjectAccessor();
+    pAccessor->StartTransaction("Add Characters");
+    result = pAccessor->SetValueByName(pFontDoc->GetPropertyObject(), "CustomCharacters", plString(sCharacters));
+    pAccessor->FinishTransaction();
+
+    if (result.Succeeded())
+      result = pFontDoc->SaveDocument(true);
+
+    if (result.Succeeded())
+    {
+      const plTransformStatus transform = plAssetCurator::GetSingleton()->TransformAsset(fontGuid, plTransformFlags::Default);
+      if (transform.Failed())
+        plLog::Error("Transforming '{}' failed: {}", sPath, transform.m_sMessage);
+    }
+  }
+
+  if (!bWasOpen)
+    pFontDoc->GetDocumentManager()->CloseDocument(pFontDoc);
+
+  return result;
 }

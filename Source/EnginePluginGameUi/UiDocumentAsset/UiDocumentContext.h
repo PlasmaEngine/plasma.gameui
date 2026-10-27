@@ -4,6 +4,7 @@
 #include <EditorEngineProcessFramework/EngineProcess/EngineProcessDocumentContext.h>
 #include <EnginePluginGameUi/EnginePluginGameUiDLL.h>
 #include <GameUiPlugin/Components/UiCanvasComponent.h>
+#include <GameUiPlugin/Elements/UiTextFit.h>
 
 /// \brief One drag-snap alignment guide line, mirrored from the editor while dragging.
 struct plUiPreviewGuide
@@ -34,6 +35,10 @@ public:
   bool GetShowNavGraph() const { return m_bShowNavGraph; }
   bool HasDevicePreset() const { return m_bHasDevicePreset; }
 
+  /// \brief The Text fit check of the preview as of the last update; the view context marks the texts that do not
+  /// fit, the editor lists them.
+  const plDynamicArray<plUiTextFitIssue>& GetTextFitIssues() const { return m_TextFitIssues; }
+
 protected:
   virtual void OnInitialize() override;
   virtual void HandleMessage(const plEditorEngineDocumentMsg* pMsg) override;
@@ -44,6 +49,13 @@ protected:
   virtual bool UpdateThumbnailViewContext(plEngineProcessViewContext* pThumbnailViewContext) override;
 
 private:
+  /// Runs the Text fit check at the view's size and sends the issues to the editor when they changed.
+  void UpdateTextFit(const plUiCanvasComponent& component);
+  plVec2 GetPreviewViewportSize() const;
+
+  plDynamicArray<plUiTextFitIssue> m_TextFitIssues;
+  plString m_sLastSentTextFit;
+
   plGameObject* m_pMainObject = nullptr;
   plComponentHandle m_hCanvasComponent;
   plUiDocumentResourceHandle m_hMainResource;

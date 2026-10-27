@@ -8,13 +8,7 @@
 #include <Foundation/IO/FileSystem/FileSystem.h>
 #include <Foundation/IO/OSFile.h>
 #include <GameUiPlugin/Elements/UiElements.h>
-
-#include <QEventLoop>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
-#include <QTimer>
-#include <QUrl>
+#include <ToolsFoundation/Network/HttpClient.h>
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plUiHtmlDocumentGenerator, 1, plRTTIDefaultAllocator<plUiHtmlDocumentGenerator>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -52,41 +46,146 @@ namespace
     plString m_sLocalFile;
   };
 
-  QByteArray FetchHttpBytes(QNetworkAccessManager& network, const QUrl& url, QString& out_sError, const QByteArray& accept = "text/css,*/*;q=0.8")
+  /// A GET of an http(s) URL; redirects are followed, except from https to http. Empty with out_sError on failure.
+  plDynamicArray<plUInt8> FetchHttpBytes(plStringView sUrl, plStringBuilder& out_sError, plStringView sAccept = "text/css,*/*;q=0.8")
   {
-    if (!url.isValid() || (url.scheme() != QStringLiteral("https") && url.scheme() != QStringLiteral("http")))
+    plDynamicArray<plUInt8> bytes;
+
+    if (!plHttpClient::IsRemoteUrl(sUrl))
     {
-      out_sError = QStringLiteral("unsupported or invalid URL");
-      return {};
+      out_sError = "unsupported or invalid URL";
+      return bytes;
     }
 
-    QNetworkRequest request(url);
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    request.setRawHeader("User-Agent", "Mozilla/5.0 PlasmaEngine-UiImporter/1.0");
-    request.setRawHeader("Accept", accept);
+    plHttpClient::Request request;
+    request.m_sUrl = sUrl;
+    request.m_Timeout = plTime::MakeFromSeconds(15);
+    request.m_Headers.PushBack("User-Agent: Mozilla/5.0 PlasmaEngine-UiImporter/1.0");
+    request.m_Headers.PushBack(plStringBuilder("Accept: ", sAccept));
 
-    QNetworkReply* pReply = network.get(request);
-    QEventLoop loop;
-    QTimer timeout;
-    timeout.setSingleShot(true);
-    QObject::connect(&timeout, &QTimer::timeout, pReply, &QNetworkReply::abort);
-    QObject::connect(pReply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    timeout.start(15000);
-    loop.exec();
-
-    QByteArray bytes;
-    if (pReply->error() != QNetworkReply::NoError)
-      out_sError = pReply->errorString();
-    else
-      bytes = pReply->readAll();
-
-    pReply->deleteLater();
-    if (bytes.size() > 16 * 1024 * 1024)
+    plUInt32 uiStatus = 0;
+    if (plHttpClient::Send(request, uiStatus, bytes, out_sError).Failed())
     {
-      out_sError = QStringLiteral("response exceeds the 16 MiB importer limit");
-      return {};
+      bytes.Clear();
+      return bytes;
     }
+
+    if (uiStatus >= 400)
+    {
+      out_sError.SetFormat("HTTP status {}", uiStatus);
+      bytes.Clear();
+      return bytes;
+    }
+
+    if (bytes.GetCount() > 16 * 1024 * 1024)
+    {
+      out_sError = "response exceeds the 16 MiB importer limit";
+      bytes.Clear();
+    }
+
     return bytes;
+  }
+
+  /// The scheme and host of an absolute URL ("https://fonts.example.com"), or empty.
+  plStringView GetUrlOrigin(plStringView sUrl)
+  {
+    const char* szScheme = sUrl.FindSubString("://");
+    if (szScheme == nullptr)
+      return {};
+
+    plStringView sAfterScheme(szScheme + 3, sUrl.GetEndPointer());
+    const char* szPath = sAfterScheme.FindSubString("/");
+    return plStringView(sUrl.GetStartPointer(), szPath != nullptr ? szPath : sUrl.GetEndPointer());
+  }
+
+  /// Removes "." and ".." segments from the path of an absolute URL.
+  plString RemoveDotSegments(plStringView sUrl)
+  {
+    const plStringView sOrigin = GetUrlOrigin(sUrl);
+    const plStringView sPath(sOrigin.GetEndPointer(), sUrl.GetEndPointer());
+
+    plHybridArray<plStringView, 16> segments;
+    sPath.Split(true, segments, "/");
+
+    plHybridArray<plStringView, 16> kept;
+    for (plUInt32 i = 0; i < segments.GetCount(); ++i)
+    {
+      const plStringView sSegment = segments[i];
+      if (sSegment == "..")
+      {
+        if (kept.GetCount() > 1)
+          kept.PopBack();
+      }
+      else if (sSegment != "." && (i == 0 || !sSegment.IsEmpty() || i + 1 == segments.GetCount()))
+      {
+        kept.PushBack(sSegment);
+      }
+    }
+
+    plStringBuilder sResult(sOrigin);
+    for (plUInt32 i = 0; i < kept.GetCount(); ++i)
+    {
+      if (i > 0)
+        sResult.Append("/");
+      sResult.Append(kept[i]);
+    }
+
+    return sResult;
+  }
+
+  /// A URL a stylesheet refers to, resolved against the stylesheet's own URL: absolute, scheme-relative, host-relative
+  /// or relative to the stylesheet's folder.
+  plString ResolveUrl(plStringView sBaseUrl, plStringView sReference)
+  {
+    if (plHttpClient::IsRemoteUrl(sReference) || sReference.StartsWith("data:"))
+      return sReference;
+
+    if (sReference.StartsWith("//"))
+    {
+      const char* szScheme = sBaseUrl.FindSubString("//");
+      return plStringBuilder(plStringView(sBaseUrl.GetStartPointer(), szScheme != nullptr ? szScheme : sBaseUrl.GetStartPointer()), sReference);
+    }
+
+    if (sReference.StartsWith("/"))
+      return RemoveDotSegments(plStringBuilder(GetUrlOrigin(sBaseUrl), sReference));
+
+    // the base without its query, fragment and file name
+    plStringView sBase = sBaseUrl;
+    if (const char* szQuery = sBase.FindSubString("?"))
+      sBase = plStringView(sBase.GetStartPointer(), szQuery);
+    if (const char* szFragment = sBase.FindSubString("#"))
+      sBase = plStringView(sBase.GetStartPointer(), szFragment);
+
+    const plStringView sOrigin = GetUrlOrigin(sBase);
+    const char* szLastSlash = sBase.FindLastSubString("/");
+
+    plStringBuilder sFolder;
+    if (szLastSlash != nullptr && szLastSlash >= sOrigin.GetEndPointer())
+      sFolder = plStringView(sBase.GetStartPointer(), szLastSlash + 1);
+    else
+      sFolder.Set(sOrigin, "/");
+
+    sFolder.Append(sReference);
+    return RemoveDotSegments(sFolder);
+  }
+
+  /// The lower-case extension of the path of a URL (without query and fragment), or empty.
+  plString GetUrlExtension(plStringView sUrl)
+  {
+    plStringView sPath = sUrl;
+    if (const char* szQuery = sPath.FindSubString("?"))
+      sPath = plStringView(sPath.GetStartPointer(), szQuery);
+    if (const char* szFragment = sPath.FindSubString("#"))
+      sPath = plStringView(sPath.GetStartPointer(), szFragment);
+
+    const char* szDot = sPath.FindLastSubString(".");
+    const char* szSlash = sPath.FindLastSubString("/");
+    if (szDot == nullptr || (szSlash != nullptr && szDot < szSlash))
+      return {};
+
+    plStringBuilder sExtension(plStringView(szDot + 1, sPath.GetEndPointer()));
+    sExtension.ToLower();
+    return sExtension;
   }
 
   plString NormalizeFontFamily(plStringView sFamily)
@@ -549,7 +648,7 @@ namespace
   }
 
   void CollectRemoteFontFaces(
-    CssSheet& sheet, plStringView sCss, const QUrl& baseUrl, plMap<plString, RemoteFontFace>& inout_faces)
+    CssSheet& sheet, plStringView sCss, plStringView sBaseUrl, plMap<plString, RemoteFontFace>& inout_faces)
   {
     const char* szCur = sCss.GetStartPointer();
     const char* szEnd = sCss.GetEndPointer();
@@ -608,7 +707,7 @@ namespace
 
           RemoteFontFace face;
           face.m_sFamily = ParseFirstFontFamily(*pFamily);
-          face.m_sUrl = baseUrl.resolved(QUrl(QString::fromUtf8(sUrl.GetData()))).toString().toUtf8().constData();
+          face.m_sUrl = ResolveUrl(sBaseUrl, sUrl);
 
           if (const plString* pWeight = FindDeclaration(declarations, "font-weight"))
           {
@@ -636,15 +735,15 @@ namespace
     }
   }
 
-  QString SanitizeFontFilePart(QString value)
+  plString SanitizeFontFilePart(plStringView sValue)
   {
-    for (const QChar c : {QChar(':'), QChar(';'), QChar('/'), QChar('\\'), QChar('?'), QChar('*'), QChar('"'), QChar('<'), QChar('>'), QChar('|'), QChar(' ')})
-      value.replace(c, QChar('_'));
-    return value;
+    plStringBuilder s(sValue);
+    for (const char* szChar : {":", ";", "/", "\\", "?", "*", "\"", "<", ">", "|", " "})
+      s.ReplaceAll(szChar, "_");
+    return s;
   }
 
-  plUInt32 CacheRemoteFontFaces(
-    QNetworkAccessManager& network, plMap<plString, RemoteFontFace>& inout_faces, plStringView sFolderAbs, plUiImportReport& report, plStringView sSourceName)
+  plUInt32 CacheRemoteFontFaces(plMap<plString, RemoteFontFace>& inout_faces, plStringView sFolderAbs, plUiImportReport& report, plStringView sSourceName)
   {
     if (inout_faces.IsEmpty())
       return 0;
@@ -662,19 +761,15 @@ namespace
     for (auto it = inout_faces.GetIterator(); it.IsValid(); ++it)
     {
       RemoteFontFace& face = it.Value();
-      const QUrl url(QString::fromUtf8(face.m_sUrl.GetData()));
-      QString sExtension = url.path().section('.', -1).toLower();
-      if (sExtension.isEmpty() || sExtension.size() > 5)
-        sExtension = QStringLiteral("woff2");
+      plString sExtension = GetUrlExtension(face.m_sUrl);
+      if (sExtension.IsEmpty() || sExtension.GetCharacterCount() > 5)
+        sExtension = "woff2";
 
-      const QString sFileName = QStringLiteral("%1-%2-%3.%4")
-                                  .arg(SanitizeFontFilePart(QString::fromUtf8(face.m_sFamily.GetData())))
-                                  .arg(face.m_iWeight)
-                                  .arg(face.m_bItalic ? QStringLiteral("italic") : QStringLiteral("normal"))
-                                  .arg(sExtension);
+      plStringBuilder sFileName;
+      sFileName.SetFormat("{}-{}-{}.{}", SanitizeFontFilePart(face.m_sFamily), face.m_iWeight, face.m_bItalic ? "italic" : "normal", sExtension);
 
       plStringBuilder sLocalFile = sCacheFolder;
-      sLocalFile.AppendPath(sFileName.toUtf8().constData());
+      sLocalFile.AppendPath(sFileName);
 
       plFileStats stats;
       if (plOSFile::GetFileStats(sLocalFile, stats).Succeeded() && stats.m_uiFileSize > 0)
@@ -684,9 +779,9 @@ namespace
         continue;
       }
 
-      QString sError;
-      const QByteArray bytes = FetchHttpBytes(network, url, sError, "font/woff2,font/ttf,font/otf,application/octet-stream;q=0.8");
-      if (bytes.isEmpty())
+      plStringBuilder sError;
+      const plDynamicArray<plUInt8> bytes = FetchHttpBytes(face.m_sUrl, sError, "font/woff2,font/ttf,font/otf,application/octet-stream;q=0.8");
+      if (bytes.IsEmpty())
       {
         failedFamilies.Insert(face.m_sFamily);
         continue;
@@ -694,7 +789,7 @@ namespace
 
       plOSFile file;
       if (file.Open(sLocalFile, plFileOpenMode::Write).Failed() ||
-          file.Write(bytes.constData(), static_cast<plUInt64>(bytes.size())).Failed())
+          file.Write(bytes.GetData(), bytes.GetCount()).Failed())
       {
         failedFamilies.Insert(face.m_sFamily);
         continue;
@@ -996,7 +1091,7 @@ namespace
     plString m_sHtmlFolderAbs;
     plMap<plString, RemoteFontFace> m_RemoteFontFaces;
     BundledFallbackFonts m_FallbackFonts;
-    QNetworkAccessManager* m_pNetwork = nullptr;
+    bool m_bFetchRemote = false; ///< remote stylesheets and fonts are downloaded
     bool m_bUsedFallbackFont = false;
 
     plString ResolveFontFile(plStringView sFamily, plInt32 iWeight, bool bItalic)
@@ -2439,19 +2534,19 @@ namespace
       plStringView sHref = node.GetAttribute("href");
       if (sHref.StartsWith_NoCase("http"))
       {
-        QString sError;
-        const QUrl url(QString::fromUtf8(plString(sHref).GetData()));
-        const QByteArray bytes = ctx.m_pNetwork != nullptr ? FetchHttpBytes(*ctx.m_pNetwork, url, sError) : QByteArray();
-        if (bytes.isEmpty())
+        plStringBuilder sError;
+        const plDynamicArray<plUInt8> bytes = ctx.m_bFetchRemote ? FetchHttpBytes(sHref, sError) : plDynamicArray<plUInt8>();
+        if (bytes.IsEmpty())
         {
           plStringBuilder sMsg;
-          sMsg.SetFormat("Remote stylesheet '{}' could not be fetched: {}.", sHref, sError.toUtf8().constData());
+          sMsg.SetFormat("Remote stylesheet '{}' could not be fetched: {}.", sHref, sError);
           ctx.m_pReport->Warning(sSourceName, sMsg);
         }
         else
         {
-          const plStringView sRemoteCss(bytes.constData(), bytes.constData() + bytes.size());
-          CollectRemoteFontFaces(ctx.m_Css, sRemoteCss, url, ctx.m_RemoteFontFaces);
+          const char* szCss = reinterpret_cast<const char*>(bytes.GetData());
+          const plStringView sRemoteCss(szCss, szCss + bytes.GetCount());
+          CollectRemoteFontFaces(ctx.m_Css, sRemoteCss, sHref, ctx.m_RemoteFontFaces);
           ctx.m_Css.AddRulesFromText(sRemoteCss, sHref);
         }
       }
@@ -2505,8 +2600,7 @@ plStatus plUiHtmlDocumentGenerator::Generate(plStringView sInputFileAbs, plStrin
   HtmlImportContext ctx;
   ctx.m_pReport = &report;
   ctx.m_Css.m_pReport = &report;
-  QNetworkAccessManager network;
-  ctx.m_pNetwork = &network;
+  ctx.m_bFetchRemote = true;
   {
     plStringBuilder sFolder = sInputFileAbs;
     sFolder.PathParentDirectory();
@@ -2515,7 +2609,7 @@ plStatus plUiHtmlDocumentGenerator::Generate(plStringView sInputFileAbs, plStrin
 
   CollectCss(*pRoot, ctx, sSourceName);
 
-  const plUInt32 uiRemoteFonts = CacheRemoteFontFaces(network, ctx.m_RemoteFontFaces, ctx.m_sHtmlFolderAbs, report, sSourceName);
+  const plUInt32 uiRemoteFonts = CacheRemoteFontFaces(ctx.m_RemoteFontFaces, ctx.m_sHtmlFolderAbs, report, sSourceName);
   if (uiRemoteFonts > 0)
   {
     plStringBuilder sMessage;

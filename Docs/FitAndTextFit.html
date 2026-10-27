@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fit to Content and Text Fit — PlasmaEngine2 Manual</title>
+<link rel="stylesheet" href="manual.css" />
+</head>
+<body>
+<div class="wrap">
+  <p class="crumbs"><a href="index.html">Manual</a> / <a href="index.html">Game UI</a> / Fit to Content and Text Fit</p>
+  <h1>Fit to Content and Text Fit</h1>
+
+  <p>
+    Translated text is rarely the length of the text it replaces. German labels run about a third longer than
+    English ones, and a button sized for "Options" cuts off "Einstellungen". Game UI handles this in two ways.
+    <b>Fit to content</b> lets a button, a panel or a text take the size its content needs, between a minimum and
+    a maximum. <b>Text fit</b> finds every text that still does not fit, in every language, while you edit and
+    when the asset is transformed.
+  </p>
+
+  <h2>Size modes</h2>
+  <p>
+    Every element has a <code>SizeMode</code>. <b>Fixed</b>, the default, keeps the authored size from the rect
+    transform. <b>Fit content</b> measures the element's content and uses that size instead, clamped to
+    <code>MinSize</code> and <code>MaxSize</code>.
+  </p>
+  <ul>
+    <li>A text measures its lines in its font, at its font size, with its letter spacing and line height.</li>
+    <li>A stack panel measures its children along its direction, with spacing, margins and padding.</li>
+    <li>Any other element measures its children, with their offsets.</li>
+    <li>Images, empty panels, grids and sub-documents keep their authored size.</li>
+  </ul>
+  <p>
+    Fitting applies only on axes where the element is not stretched. An element anchored at a point (both anchors
+    equal on that axis) grows around its pivot: a button anchored at its centre grows to both sides, one anchored
+    at its left edge grows to the right. A stretched axis always follows its parent.
+  </p>
+  <p>
+    Inside a stack panel the child's size along the stack comes from the same measurement, so a vertical menu of
+    Fit content buttons lays itself out as the labels change. The measured text is the text the element shows:
+    its binding, its translation in the previewed language, or the pseudo-localised text.
+  </p>
+  <div class="note"><div class="nh">Note</div>
+    A <code>MaxSize</code> of 0 on an axis means no limit on that axis. A text that wraps needs a
+    <code>MaxSize</code> width: it wraps at that width and grows in height.
+  </div>
+
+  <h3>Making a button fit its label</h3>
+  <ol class="steps">
+    <li>Select the button, or the text inside it, on the canvas or in the hierarchy.</li>
+    <li>In the <b>Size</b> panel, set <b>Size</b> to <b>Fit content</b>.</li>
+    <li>Drag <b>Min width</b> and <b>Max width</b> to the limits the design allows. When the element has no limits
+      yet, switching to Fit content sets a minimum width of the current width (at most 120 px), a minimum height
+      of the current height, and a maximum width of 2.5 times the current width (at least 420 px).</li>
+    <li>Pick an <b>Overflow</b> mode for the label, for the case where the text is longer than the maximum.</li>
+  </ol>
+  <p>
+    The <b>Needs</b> row shows the width the label needs against the width it has, red when it does not fit. A drag
+    on a slider is one undo step.
+  </p>
+
+  <h3>Fit all buttons</h3>
+  <p>
+    <b>Fit all buttons</b> in the canvas toolbar switches every button and toggle of the document to Fit content
+    with the default limits above. It is one undo step. Limits a button already has are kept.
+  </p>
+
+  <h2>Overflow modes</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Mode</th><th>What a text that is too long does</th></tr>
+    <tr><td>Overflow</td><td>Draws past its rect.</td></tr>
+    <tr><td>Clip</td><td>Is cut at its rect.</td></tr>
+    <tr><td>Ellipsis</td><td>The last line that fits ends in "...".</td></tr>
+    <tr><td>Shrink to Fit</td><td>Steps its font size down, to no less than <code>MinFontSize</code>, until it
+      fits. A text that does not fit even at the minimum is truncated with "...".</td></tr>
+  </table></div>
+
+  <h2>The Text Fit panel</h2>
+  <p>
+    The <b>Text Fit</b> panel lists every text of the document that does not fit in the language the canvas
+    previews. Its header reads, for example, <b>TEXT FIT &middot; 3 in Deutsch</b>, or <b>&middot; all fit</b>.
+    Each row names the control and the problem:
+  </p>
+  <div class="tblwrap"><table>
+    <tr><th>Row</th><th>Meaning</th></tr>
+    <tr><td>draws past its rect</td><td>Overflow mode, and the text is longer than its rect.</td></tr>
+    <tr><td>is clipped</td><td>Clip mode, and part of the text is cut off.</td></tr>
+    <tr><td>is ellipsized</td><td>Ellipsis mode, or Shrink to Fit even at the minimum font size.</td></tr>
+    <tr><td>shrinks to N px</td><td>Shrink to Fit found a size that fits. Informational.</td></tr>
+    <tr><td>N characters missing from Font</td><td>The texts use characters the font has no glyph for. They draw
+      as boxes. One row per font.</td></tr>
+  </table></div>
+  <p>
+    Click a row to select its control. A red dot marks each text that does not fit at the top right of its rect on
+    the canvas. The canvas status row sums it up: "3 overflowing &middot; 12 fit to content".
+  </p>
+
+  <h3>Checking a language</h3>
+  <ol class="steps">
+    <li>Choose the language in the <b>Language</b> strip of the canvas toolbar. Languages are the folders of
+      <code>&lt;project&gt;/Localization</code> (and <code>Editor/Localization</code>). Their names show in their
+      own language when the editor font can draw them.</li>
+    <li>Read the Text Fit panel. Fix each row: Fit content, a wider rect, Shrink to Fit, or a shorter
+      translation.</li>
+    <li>Choose <b>Pseudo +40%</b> to test texts that have no translation yet. Every text shows lengthened by 40%
+      with accented letters ("[&Ouml;&thorn;&#355;&icirc;&ouml;&ntilde;&scaron; ~~~]"), which shows both
+      truncation and missing glyphs before any translation exists.</li>
+  </ol>
+
+  <h3>Missing characters</h3>
+  <p>
+    A missing-characters row has an <b>Add characters</b> button. It adds the missing characters, and every
+    character the previewed language's string tables use, to the font's <code>CustomCharacters</code>, then saves
+    and transforms the font. The change is one undo step in the font asset.
+  </p>
+
+  <h2>Transform warnings</h2>
+  <p>
+    Transforming a UI Document checks its texts at 1920 &times; 1080, once with the authored texts and once per
+    language of the project. Each text that does not fit is a warning in the log, such as
+    <code>Text fit (de): Btn_Options: ellipsized, needs 212 px, has 170 px</code>, at most 20 per language. A
+    shrunk text that fits is not a warning. Editing a string table re-transforms the documents.
+  </p>
+  <p>
+    The asset browser shows assets whose last transform had warnings with the warning badge. The Asset Curator
+    panel lists them under <b>Warnings</b> and shows the warnings in the asset's details.
+  </p>
+
+  <h2>Property reference</h2>
+  <div class="tblwrap"><table>
+    <tr><th>Property</th><th>Default</th><th>Description</th></tr>
+    <tr class="grp"><td colspan="3">Every element</td></tr>
+    <tr><td><code>SizeMode</code></td><td>Fixed</td><td>Fixed keeps the authored size. Fit content uses the size of
+      the content on the axes the element is not stretched on.</td></tr>
+    <tr><td><code>MinSize</code></td><td>(0, 0)</td><td>Smallest size with Fit content, in px. Shown with Fit
+      content.</td></tr>
+    <tr><td><code>MaxSize</code></td><td>(0, 0)</td><td>Largest size with Fit content, in px; 0 = no limit. Also the
+      wrap width of a wrapping text.</td></tr>
+    <tr class="grp"><td colspan="3">Text</td></tr>
+    <tr><td><code>Overflow</code></td><td>Overflow</td><td>Overflow, Clip, Ellipsis or Shrink to Fit (see above).</td></tr>
+    <tr><td><code>MinFontSize</code></td><td>10</td><td>Smallest font size Shrink to Fit may use. Shown with Shrink
+      to Fit.</td></tr>
+    <tr><td><code>LetterSpacing</code></td><td>0 px</td><td>Space added after each character.</td></tr>
+    <tr><td><code>LineHeight</code></td><td>1</td><td>Line height as a multiple of the font's line height.</td></tr>
+  </table></div>
+
+  <div class="seealso">
+    See also: <a href="FontsAndCharacters.html">Fonts and Characters</a> &middot;
+    <a href="TextAndBrushEffects.html">Text and Brush Effects</a> &middot;
+    <a href="WorldSpaceCanvas.html">World-Space Canvases</a>
+  </div>
+</div>
+</body>
+</html>

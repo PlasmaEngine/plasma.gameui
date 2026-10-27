@@ -1,5 +1,6 @@
 #include <EditorPluginGameUi/EditorPluginGameUiPCH.h>
 
+#include <EditorPluginGameUi/UiImport/UiImportKeyTime.h>
 #include <EditorPluginGameUi/UiImport/UiImportWriter.h>
 #include <EditorPluginGameUi/UiImport/UiImportXaml.h>
 #include <EditorPluginGameUi/UiImport/UiMarkupParser.h>
@@ -489,25 +490,7 @@ namespace
 
   float ParseKeyTime(plStringView sValue)
   {
-    plStringBuilder sTime = sValue;
-    sTime.Trim(" \t");
-    if (sTime.IsEmpty())
-      return 0.0f;
-
-    plHybridArray<plStringView, 3> parts;
-    sTime.Split(false, parts, ":");
-
-    double values[3] = {0.0, 0.0, 0.0};
-    for (plUInt32 i = 0; i < parts.GetCount(); ++i)
-    {
-      plConversionUtils::StringToFloat(parts[i], values[i]).IgnoreResult();
-    }
-
-    if (parts.GetCount() == 3)
-      return static_cast<float>(values[0] * 3600.0 + values[1] * 60.0 + values[2]);
-    if (parts.GetCount() == 2)
-      return static_cast<float>(values[0] * 60.0 + values[1]);
-    return static_cast<float>(values[0]);
+    return plUiParseXamlKeyTime(sValue);
   }
 
   plInt32 ParseAnimationEasing(const plUiMarkupNode& keyNode)

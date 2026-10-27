@@ -3,7 +3,7 @@
 #include <EditorPluginGameUi/UiImport/UiImportWriter.h>
 
 #include <EditorFramework/Assets/AssetCurator.h>
-#include <EditorFramework/EditorApp/EditorApp.moc.h>
+#include <EditorFramework/EditorApp/EditorApp.h>
 #include <Foundation/IO/OSFile.h>
 #include <GameUiPlugin/Elements/UiAnimationClip.h>
 #include <GameUiPlugin/Elements/UiElements.h>
@@ -18,7 +18,7 @@ plStatus plUiImportWriter::WriteDocument(const plUiImportDocument& importDoc, pl
     return plStatus(plFmt("Import target '{}' already exists - delete or rename it first.", importDoc.m_sTargetPathAbs));
   }
 
-  plDocument* pDoc = plQtEditorApp::GetSingleton()->CreateDocument(importDoc.m_sTargetPathAbs, plDocumentFlags::None);
+  plDocument* pDoc = plEditorApp::GetSingleton()->CreateDocument(importDoc.m_sTargetPathAbs, plDocumentFlags::None);
   if (pDoc == nullptr)
   {
     return plStatus(plFmt("Could not create UI Document '{}'.", importDoc.m_sTargetPathAbs));
@@ -244,7 +244,7 @@ plString plUiImportWriter::GetOrCreateTextureAsset(plStringView sImageFileAbs, p
   plStringBuilder sImageInProject = sImageFileAbs;
   {
     plStringBuilder sRelTest = sImageFileAbs;
-    if (!plQtEditorApp::GetSingleton()->MakePathDataDirectoryRelative(sRelTest))
+    if (!plEditorApp::GetSingleton()->MakePathDataDirectoryRelative(sRelTest))
     {
       plStringBuilder sTarget = sDocumentFolderAbs;
       sTarget.AppendPath("ImportedImages");
@@ -280,7 +280,7 @@ plString plUiImportWriter::GetOrCreateTextureAsset(plStringView sImageFileAbs, p
     }
   }
 
-  plDocument* pDoc = plQtEditorApp::GetSingleton()->CreateDocument(sTextureDoc, plDocumentFlags::None);
+  plDocument* pDoc = plEditorApp::GetSingleton()->CreateDocument(sTextureDoc, plDocumentFlags::None);
   if (pDoc == nullptr)
   {
     m_TextureGuids[sKey] = plString();
@@ -294,7 +294,7 @@ plString plUiImportWriter::GetOrCreateTextureAsset(plStringView sImageFileAbs, p
   if (!rootChildren.IsEmpty())
   {
     plStringBuilder sInputRel = sImageInProject;
-    plQtEditorApp::GetSingleton()->MakePathDataDirectoryRelative(sInputRel);
+    plEditorApp::GetSingleton()->MakePathDataDirectoryRelative(sInputRel);
 
     auto& accessor = rootChildren[0]->GetTypeAccessor();
     accessor.SetValue("Input1", sInputRel.GetView());
@@ -335,7 +335,7 @@ plString plUiImportWriter::GetOrCreateFontAsset(plStringView sFontFileAbs, plDyn
     }
   }
 
-  plDocument* pDoc = plQtEditorApp::GetSingleton()->CreateDocument(sFontDoc, plDocumentFlags::None);
+  plDocument* pDoc = plEditorApp::GetSingleton()->CreateDocument(sFontDoc, plDocumentFlags::None);
   if (pDoc == nullptr)
   {
     m_FontGuids[sKey] = plString();
@@ -348,7 +348,7 @@ plString plUiImportWriter::GetOrCreateFontAsset(plStringView sFontFileAbs, plDyn
   if (!rootChildren.IsEmpty())
   {
     plStringBuilder sInputRel = sFontFileAbs;
-    plQtEditorApp::GetSingleton()->MakePathDataDirectoryRelative(sInputRel);
+    plEditorApp::GetSingleton()->MakePathDataDirectoryRelative(sInputRel);
 
     auto& accessor = rootChildren[0]->GetTypeAccessor();
     accessor.SetValue("FontFile", sInputRel.GetView());
@@ -362,15 +362,7 @@ plString plUiImportWriter::GetOrCreateFontAsset(plStringView sFontFileAbs, plDyn
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
-#include <QApplication>
-#include <QClipboard>
-#include <QDialog>
-#include <QDialogButtonBox>
-#include <QHeaderView>
-#include <QLabel>
-#include <QPushButton>
-#include <QTreeWidget>
-#include <QVBoxLayout>
+#include <EditorPluginGameUi/UiImport/UiImportReportEngineDlg.h>
 
 void plUiImportShowReport(const plUiImportReport& report, plStringView sTitle)
 {
@@ -398,73 +390,10 @@ void plUiImportShowReport(const plUiImportReport& report, plStringView sTitle)
     }
   }
 
-  if (qApp == nullptr || !report.HasProblems())
+  // without the editor UI renderer (a process without windows) the log is all there is
+  if (!report.HasProblems() || !plEngineDialog::IsEngineEnabled())
     return;
 
-  QDialog dlg(QApplication::activeWindow());
-  dlg.setWindowTitle(QString::fromUtf8(plStringBuilder(sTitle).GetData()));
-  dlg.resize(720, 420);
-
-  QVBoxLayout* pLayout = new QVBoxLayout(&dlg);
-
-  QLabel* pSummary = new QLabel(&dlg);
-  plUInt32 uiWarnings = 0, uiErrors = 0;
-  for (const plUiImportReportEntry& e : report.m_Entries)
-  {
-    if (e.m_Severity == plUiImportSeverity::Warning)
-      ++uiWarnings;
-    else if (e.m_Severity == plUiImportSeverity::Error)
-      ++uiErrors;
-  }
-  pSummary->setText(QString("%1 document(s), %2 element(s), %3 image(s) imported — %4 warning(s), %5 error(s). Everything listed below was approximated or dropped.")
-                      .arg(report.m_uiDocuments)
-                      .arg(report.m_uiElements)
-                      .arg(report.m_uiImages)
-                      .arg(uiWarnings)
-                      .arg(uiErrors));
-  pSummary->setWordWrap(true);
-  pLayout->addWidget(pSummary);
-
-  QTreeWidget* pTree = new QTreeWidget(&dlg);
-  pTree->setColumnCount(3);
-  pTree->setHeaderLabels({"Severity", "Source", "Message"});
-  pTree->setRootIsDecorated(false);
-  pTree->setAlternatingRowColors(true);
-
-  for (const plUiImportReportEntry& e : report.m_Entries)
-  {
-    const char* szSev = e.m_Severity == plUiImportSeverity::Error ? "Error" : (e.m_Severity == plUiImportSeverity::Warning ? "Warning" : "Info");
-
-    QTreeWidgetItem* pItem = new QTreeWidgetItem(pTree);
-    pItem->setText(0, szSev);
-    pItem->setText(1, QString::fromUtf8(e.m_sSourcePath.GetData()));
-    pItem->setText(2, QString::fromUtf8(e.m_sMessage.GetData()));
-
-    if (e.m_Severity == plUiImportSeverity::Error)
-      pItem->setForeground(0, QColor(255, 100, 100));
-    else if (e.m_Severity == plUiImportSeverity::Warning)
-      pItem->setForeground(0, QColor(252, 196, 25));
-  }
-
-  pTree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-  pTree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-  pTree->header()->setSectionResizeMode(2, QHeaderView::Stretch);
-  pLayout->addWidget(pTree, 1);
-
-  QDialogButtonBox* pButtons = new QDialogButtonBox(QDialogButtonBox::Ok, &dlg);
-  QPushButton* pCopy = pButtons->addButton("Copy to Clipboard", QDialogButtonBox::ActionRole);
-
-  QObject::connect(pButtons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-  QObject::connect(pCopy, &QPushButton::clicked, [&report]() {
-      QString sText;
-      for (const plUiImportReportEntry& e : report.m_Entries)
-      {
-        const char* szSev = e.m_Severity == plUiImportSeverity::Error ? "Error" : (e.m_Severity == plUiImportSeverity::Warning ? "Warning" : "Info");
-        sText += QString("%1\t%2\t%3\n").arg(szSev).arg(QString::fromUtf8(e.m_sSourcePath.GetData())).arg(QString::fromUtf8(e.m_sMessage.GetData()));
-      }
-      QApplication::clipboard()->setText(sText); });
-
-  pLayout->addWidget(pButtons);
-
-  dlg.exec();
+  plUiImportReportEngineDlg dlg(report, sTitle);
+  dlg.Exec();
 }
